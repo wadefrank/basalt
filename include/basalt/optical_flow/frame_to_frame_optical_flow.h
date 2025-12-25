@@ -74,19 +74,25 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
   FrameToFrameOpticalFlow(const VioConfig& config,
                           const basalt::Calibration<double>& calib)
       : t_ns(-1), frame_counter(0), last_keypoint_id(0), config(config) {
+    
+    // 设置输入队列的大小为10
     input_queue.set_capacity(10);
-
+    
+    // 相机参数
     this->calib = calib.cast<Scalar>();
-
+    
+    // pattern
     patch_coord = PatchT::pattern2.template cast<float>();
-
+    
+    // 如果是双目
     if (calib.intrinsics.size() > 1) {
       Eigen::Matrix4d Ed;
       Sophus::SE3d T_i_j = calib.T_i_c[0].inverse() * calib.T_i_c[1];
-      computeEssential(T_i_j, Ed);
+      computeEssential(T_i_j, Ed);  // 计算基础矩阵
       E = Ed.cast<Scalar>();
     }
 
+    // 开启处理线程
     processing_thread.reset(
         new std::thread(&FrameToFrameOpticalFlow::processingLoop, this));
   }
@@ -97,32 +103,41 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     OpticalFlowInput::Ptr input_ptr;
 
     while (true) {
+      // 从输入队列中获取图像
       input_queue.pop(input_ptr);
 
+      // 如果图像为空，则在输出队列中添加一个空的元素
       if (!input_ptr.get()) {
         if (output_queue) output_queue->push(nullptr);
         break;
       }
 
+      // 追踪特征点，添加特征点，剔除外点，将追踪结果push到输出队列
       processFrame(input_ptr->t_ns, input_ptr);
     }
   }
 
   void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_vec) {
+    
+    // 如果图像的数据为空直接返回
     for (const auto& v : new_img_vec->img_data) {
       if (!v.img.get()) return;
     }
 
+    // 初始化
     if (t_ns < 0) {
       t_ns = curr_t_ns;
 
+      // step1：feature 像素位姿的观测容器transforms初始化
       transforms.reset(new OpticalFlowResult);
       transforms->observations.resize(calib.intrinsics.size());
       transforms->t_ns = t_ns;
 
+      // step2：设置图像金字塔，注意：为金字塔开辟的是一个数组
       pyramid.reset(new std::vector<basalt::ManagedImagePyr<uint16_t>>);
+      // 金字塔个数对应相机的个数
       pyramid->resize(calib.intrinsics.size());
-
+      // 多线程执行图像金字塔的构建
       tbb::parallel_for(tbb::blocked_range<size_t>(0, calib.intrinsics.size()),
                         [&](const tbb::blocked_range<size_t>& r) {
                           for (size_t i = r.begin(); i != r.end(); ++i) {
@@ -132,16 +147,24 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
                           }
                         });
 
+      // step3：将图像的指针放入到transforms中
       transforms->input_images = new_img_vec;
-
+      
+      // step4：添加特征点
       addPoints();
+
+      // step5：使用对极几何剔除外点
       filterPoints();
 
-    } else {
+    } else {  // 开始正常追踪
+
+      // step1：更新时间
       t_ns = curr_t_ns;
 
+      // step2：更新last image的图像金字塔
       old_pyramid = pyramid;
 
+      // step3：构造current image的图像金字塔
       pyramid.reset(new std::vector<basalt::ManagedImagePyr<uint16_t>>);
       pyramid->resize(calib.intrinsics.size());
       tbb::parallel_for(tbb::blocked_range<size_t>(0, calib.intrinsics.size()),
@@ -152,7 +175,8 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
                                 config.optical_flow_levels);
                           }
                         });
-
+      
+      // step3：追踪特征点
       OpticalFlowResult::Ptr new_transforms;
       new_transforms.reset(new OpticalFlowResult);
       new_transforms->observations.resize(calib.intrinsics.size());
@@ -164,20 +188,34 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
                     new_transforms->observations[i]);
       }
 
+      // step4：保存追踪结果
       transforms = new_transforms;
       transforms->input_images = new_img_vec;
 
+      // step5：增加特征点
       addPoints();
+
+      // step6：使用对极几何剔除外点
       filterPoints();
     }
 
+    // 判断是否定义了输出队列，如果输出队列不为空，将结果push到输出队列中
     if (output_queue && frame_counter % config.optical_flow_skip_frames == 0) {
       output_queue->push(transforms);
     }
 
+    // 图像的数目累加
     frame_counter++;
   }
 
+  /**
+   * @brief 使用光流追踪算法计算左目图像提取的特征点在右目图像中的位置，（图像到图像的追踪） 
+   * 
+   * @param pyr_1             左目图像
+   * @param pyr_2             右目图像
+   * @param transform_map_1   左目图像特征点
+   * @param transform_map_2   右目图像特征点
+   */
   void trackPoints(const basalt::ManagedImagePyr<uint16_t>& pyr_1,
                    const basalt::ManagedImagePyr<uint16_t>& pyr_2,
                    const Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>&
@@ -208,18 +246,24 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
         const Eigen::AffineCompact2f& transform_1 = init_vec[r];
         Eigen::AffineCompact2f transform_2 = transform_1;
 
+        // 正向追踪
         bool valid = trackPoint(pyr_1, pyr_2, transform_1, transform_2);
 
+        // 如果正向追踪成功
         if (valid) {
           Eigen::AffineCompact2f transform_1_recovered = transform_2;
-
+          
+          // 进行一次逆向追踪
           valid = trackPoint(pyr_2, pyr_1, transform_2, transform_1_recovered);
 
+          // 如果逆向追踪也成功
           if (valid) {
+            // 计算逆向追踪的结果和特征点的初始位置的距离
             Scalar dist2 = (transform_1.translation() -
                             transform_1_recovered.translation())
                                .squaredNorm();
-
+            
+            // 如果距离小于一定阈值，则认为追踪合法
             if (dist2 < config.optical_flow_max_recovered_dist2) {
               result[id] = transform_2;
             }
@@ -237,6 +281,16 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     transform_map_2.insert(result.begin(), result.end());
   }
 
+  /**
+   * @brief 点到点的追踪
+   * 
+   * @param old_pyr 
+   * @param pyr 
+   * @param old_transform 
+   * @param transform 
+   * @return true 
+   * @return false 
+   */
   inline bool trackPoint(const basalt::ManagedImagePyr<uint16_t>& old_pyr,
                          const basalt::ManagedImagePyr<uint16_t>& pyr,
                          const Eigen::AffineCompact2f& old_transform,
@@ -267,6 +321,15 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     return patch_valid;
   }
 
+  /**
+   * @brief 在每一层金字塔中进行特征点追踪
+   * 
+   * @param img_2 
+   * @param dp 
+   * @param transform 
+   * @return true 
+   * @return false 
+   */
   inline bool trackPointAtLevel(const Image<const uint16_t>& img_2,
                                 const PatchT& dp,
                                 Eigen::AffineCompact2f& transform) const {
@@ -280,10 +343,12 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
       typename PatchT::Matrix2P transformed_pat =
           transform.linear().matrix() * PatchT::pattern2;
       transformed_pat.colwise() += transform.translation();
-
+      
+      // 计算残差
       patch_valid &= dp.residual(img_2, transformed_pat, res);
 
       if (patch_valid) {
+        // 求出增量
         const Vector3 inc = -dp.H_se2_inv_J_se2_T * res;
 
         // avoid NaN in increment (leads to SE2::exp crashing)
@@ -293,10 +358,12 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
         patch_valid &= inc.template lpNorm<Eigen::Infinity>() < 1e6;
 
         if (patch_valid) {
+          // 乘上扰动
           transform *= SE2::exp(inc).matrix();
 
           const int filter_margin = 2;
 
+          // 判断patch是否还在图像范围内
           patch_valid &= img_2.InBounds(transform.translation(), filter_margin);
         }
       }
@@ -308,29 +375,35 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
   void addPoints() {
     Eigen::aligned_vector<Eigen::Vector2d> pts0;
 
+    // 将以前追踪到的点放入到pts0，进行临时保存
     for (const auto& kv : transforms->observations.at(0)) {
       pts0.emplace_back(kv.second.translation().cast<double>());
     }
 
     KeypointsData kd;
-
+    
+    // 检测特征点，新检测的特征点存放在kd里面
     detectKeypoints(pyramid->at(0).lvl(0), kd,
                     config.optical_flow_detection_grid_size, 1, pts0);
 
     Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f> new_poses0,
         new_poses1;
 
+    // 添加新的特征点的观测值
     for (size_t i = 0; i < kd.corners.size(); i++) {
       Eigen::AffineCompact2f transform;
+      // 旋转设置成单位阵
       transform.setIdentity();
+      // 平移设置成像素位置
       transform.translation() = kd.corners[i].cast<Scalar>();
 
       transforms->observations.at(0)[last_keypoint_id] = transform;
       new_poses0[last_keypoint_id] = transform;
 
-      last_keypoint_id++;
+      last_keypoint_id++; // last_keypoint_id是一个全局变量
     }
 
+    // 如果是双目相机，使用光流追踪算法计算左目图像提取的特征点在右目图像中的位置
     if (calib.intrinsics.size() > 1) {
       trackPoints(pyramid->at(0), pyramid->at(1), new_poses0, new_poses1);
 
@@ -340,7 +413,12 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     }
   }
 
+  /**
+   * @brief 使用对极几何的方法剔除外点 
+   * 
+   */
   void filterPoints() {
+    // 如果不是双目，则没法用对极几何的方式剔除外点
     if (calib.intrinsics.size() < 2) return;
 
     std::set<KeypointId> lm_to_remove;
@@ -348,6 +426,7 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     std::vector<KeypointId> kpid;
     Eigen::aligned_vector<Eigen::Vector2f> proj0, proj1;
 
+    // step1：获得左目图像和右目图像都可以看到的特征点
     for (const auto& kv : transforms->observations.at(1)) {
       auto it = transforms->observations.at(0).find(kv.first);
 
@@ -358,12 +437,14 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
       }
     }
 
+    // step2：将特征点反投影为归一化坐标的3d点
     Eigen::aligned_vector<Eigen::Vector4f> p3d0, p3d1;
     std::vector<bool> p3d0_success, p3d1_success;
 
     calib.intrinsics[0].unproject(proj0, p3d0, p3d0_success);
     calib.intrinsics[1].unproject(proj1, p3d1, p3d1_success);
 
+    // step3：使用对极几何剔除外点
     for (size_t i = 0; i < p3d0_success.size(); i++) {
       if (p3d0_success[i] && p3d1_success[i]) {
         const double epipolar_error =
@@ -377,6 +458,7 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
       }
     }
 
+    // step4：只剔除外点在right_image中的观测
     for (int id : lm_to_remove) {
       transforms->observations.at(1).erase(id);
     }
