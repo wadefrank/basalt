@@ -158,14 +158,26 @@ void detectKeypointsMapping(const basalt::Image<const uint16_t>& img_raw,
   }
 }
 
+/**
+ * @brief 
+ * 
+ * @param img_raw           图像
+ * @param kd                保存新检测到的特征点的容器
+ * @param PATCH_SIZE        单个cell的边长（默认50）
+ * @param num_points_cell   每个cell提取的特征点的个数
+ * @param current_points    当前已经检测到的特征点
+ */
 void detectKeypoints(
     const basalt::Image<const uint16_t>& img_raw, KeypointsData& kd,
     int PATCH_SIZE, int num_points_cell,
     const Eigen::aligned_vector<Eigen::Vector2d>& current_points) {
+  
+  // 清空容器
   kd.corners.clear();
   kd.corner_angles.clear();
   kd.corner_descriptors.clear();
 
+  // 提取的特征点具有中心对称
   const size_t x_start = (img_raw.w % PATCH_SIZE) / 2;
   const size_t x_stop = x_start + PATCH_SIZE * (img_raw.w / PATCH_SIZE - 1);
 
@@ -174,10 +186,13 @@ void detectKeypoints(
 
   //  std::cerr << "x_start " << x_start << " x_stop " << x_stop << std::endl;
   //  std::cerr << "y_start " << y_start << " y_stop " << y_stop << std::endl;
-
+  
+  // cells保存每个cell内的特征点个数
   Eigen::MatrixXi cells;
+  // 初始化cells
   cells.setZero(img_raw.h / PATCH_SIZE + 1, img_raw.w / PATCH_SIZE + 1);
 
+  // 统计已经提取到的特征点
   for (const Eigen::Vector2d& p : current_points) {
     if (p[0] >= x_start && p[1] >= y_start && p[0] < x_stop + PATCH_SIZE &&
         p[1] < y_stop + PATCH_SIZE) {
@@ -190,14 +205,18 @@ void detectKeypoints(
 
   for (size_t x = x_start; x <= x_stop; x += PATCH_SIZE) {
     for (size_t y = y_start; y <= y_stop; y += PATCH_SIZE) {
+
+      // 已经拥有特征点的cell不再提取特征点
       if (cells((y - y_start) / PATCH_SIZE, (x - x_start) / PATCH_SIZE) > 0)
         continue;
 
+      // 将图像转换成cv::Mat格式
       const basalt::Image<const uint16_t> sub_img_raw =
           img_raw.SubImage(x, y, PATCH_SIZE, PATCH_SIZE);
 
       cv::Mat subImg(PATCH_SIZE, PATCH_SIZE, CV_8U);
 
+      // 16bit只取后8位（高八位）
       for (int y = 0; y < PATCH_SIZE; y++) {
         uchar* sub_ptr = subImg.ptr(y);
         for (int x = 0; x < PATCH_SIZE; x++) {
@@ -208,10 +227,13 @@ void detectKeypoints(
       int points_added = 0;
       int threshold = 40;
 
+      // 每个cell提取一定数量的特征点，阈值逐渐降低
       while (points_added < num_points_cell && threshold >= 5) {
         std::vector<cv::KeyPoint> points;
+        // 使用opencv中的FAST提取特征
         cv::FAST(subImg, points, threshold);
 
+        // 按照特征点的响应强度排序
         std::sort(points.begin(), points.end(),
                   [](const cv::KeyPoint& a, const cv::KeyPoint& b) -> bool {
                     return a.response > b.response;
