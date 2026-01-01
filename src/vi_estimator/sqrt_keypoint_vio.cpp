@@ -367,6 +367,9 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
     }
   }
 
+  // 关键帧判断条件：
+  //     1. 跟踪到的3d点 / (跟踪到的3d点+未跟踪到的3d点) < 阈值
+  //     2. 离上一帧关键帧的帧数 > 阈值
   if (Scalar(connected0) / (connected0 + unconnected_obs0.size()) <
           Scalar(config.vio_new_kf_keypoints_thresh) &&
       frames_after_kf > config.vio_min_frames_after_kf)
@@ -408,6 +411,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
       }
 
       // triangulate
+      // 通过三角化恢复当前帧的特征点的逆深度
       bool valid_kp = false;
       const Scalar min_triang_distance2 =
           Scalar(config.vio_min_triangulation_dist *
@@ -441,6 +445,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
         Vec4 p0_triangulated = triangulate(p0_3d.template head<3>(),
                                            p1_3d.template head<3>(), T_0_1);
 
+        // 将成功恢复逆深度的3d点加入到landmark数据库
         if (p0_triangulated.array().isFinite().all() &&
             p0_triangulated[3] > 0 && p0_triangulated[3] < 3.0) {
           Keypoint<Scalar> kpt_pos;
@@ -455,6 +460,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
         }
       }
 
+      // 将视觉测量关系加入到数据库
       if (valid_kp) {
         for (const auto& kv_obs : kp_obs) {
           lmdb.addObservation(kv_obs.first, kv_obs.second);
