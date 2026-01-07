@@ -254,6 +254,9 @@ void NfrMapper::optimize(int num_iterations) {
 
     double rld_error;
     Eigen::aligned_vector<RelLinData> rld_vec;
+
+    // 构建视觉因子的hessian矩阵
+    // visual measurement   按主导帧划分，每一个主导帧构建一个相对位姿hessian
     linearizeHelper(rld_vec, lmdb.getObservations(), rld_error);
 
     //      SparseHashAccumulator<double> accum;
@@ -269,8 +272,10 @@ void NfrMapper::optimize(int num_iterations) {
     //        linearizeAbs(rel_H, rel_b, rld, aom, accum);
     //      }
 
-    MapperLinearizeAbsReduce<SparseHashAccumulator<double>> lopt(aom,
-                                                                 &frame_poses);
+    // 并行的计算相对位姿的舒尔消元，和通过伴随矩阵相对位姿恢复绝对位姿的hessian矩阵
+    MapperLinearizeAbsReduce<SparseHashAccumulator<double>> lopt(aom, &frame_poses);
+
+    // 定义范围
     tbb::blocked_range<Eigen::aligned_vector<RelLinData>::const_iterator> range(
         rld_vec.begin(), rld_vec.end());
     tbb::blocked_range<Eigen::aligned_vector<RollPitchFactor>::const_iterator>

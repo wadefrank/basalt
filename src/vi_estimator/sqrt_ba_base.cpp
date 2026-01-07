@@ -142,6 +142,7 @@ Eigen::VectorXd SqrtBundleAdjustmentBase<Scalar_>::checkNullspace(
     Mat3d J = -SO3d::hat(trans);
     J *= eps;
 
+    // 平移
     inc_roll.template segment<3>(kv.second.first) = J.col(0);
     inc_pitch.template segment<3>(kv.second.first) = J.col(1);
     inc_yaw.template segment<3>(kv.second.first) = J.col(2);
@@ -156,6 +157,7 @@ Eigen::VectorXd SqrtBundleAdjustmentBase<Scalar_>::checkNullspace(
       Mat3d J_vel = -SO3d::hat(vel);
       J_vel *= eps;
 
+      // 旋转
       inc_roll.template segment<3>(kv.second.first + POSE_SIZE) = J_vel.col(0);
       inc_pitch.template segment<3>(kv.second.first + POSE_SIZE) = J_vel.col(1);
       inc_yaw.template segment<3>(kv.second.first + POSE_SIZE) = J_vel.col(2);

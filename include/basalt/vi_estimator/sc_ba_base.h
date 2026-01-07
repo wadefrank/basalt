@@ -59,8 +59,8 @@ class ScBundleAdjustmentBase : public BundleAdjustmentBase<Scalar_> {
   struct RelLinDataBase {
     std::vector<std::pair<TimeCamId, TimeCamId>> order;
 
-    Eigen::aligned_vector<Mat6> d_rel_d_h;
-    Eigen::aligned_vector<Mat6> d_rel_d_t;
+    Eigen::aligned_vector<Mat6> d_rel_d_h;  // 相对位姿对 host frame 的导数
+    Eigen::aligned_vector<Mat6> d_rel_d_t;  // 相对位姿对 target frame 的导数
   };
 
   struct FrameRelLinData {
@@ -78,7 +78,19 @@ class ScBundleAdjustmentBase : public BundleAdjustmentBase<Scalar_> {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   };
 
+  // 相对位姿hessian矩阵子块存储器
   struct RelLinData : public RelLinDataBase {
+    /**
+     * @brief 构造函数
+     * 
+     *          rlpose  point   b   
+     * rlpose   Hpp     Hpl     bp  [Hpp, Hpl, bp] -> Hpppl
+     * 
+     * point            Hll     bl   // 这个是一个点单独拥有的
+     * 
+     * @param num_keypoints 
+     * @param num_rel_poses 
+     */
     RelLinData(size_t num_keypoints, size_t num_rel_poses) {
       Hll.reserve(num_keypoints);
       Hllinv.reserve(num_keypoints);
@@ -113,6 +125,7 @@ class ScBundleAdjustmentBase : public BundleAdjustmentBase<Scalar_> {
     Eigen::aligned_unordered_map<int, Mat3> Hll;
     Eigen::aligned_unordered_map<int, Mat3> Hllinv;
     Eigen::aligned_unordered_map<int, Vec3> bl;
+    // 由landmark检索相对位姿pose
     Eigen::aligned_unordered_map<int, std::vector<std::pair<size_t, size_t>>>
         lm_to_obs;
 

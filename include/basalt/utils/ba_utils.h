@@ -46,14 +46,16 @@ Sophus::SE3<Scalar> computeRelPose(
     Sophus::Matrix6<Scalar>* d_rel_d_t = nullptr) {
   Sophus::SE3<Scalar> tmp2 = (T_i_c_t).inverse();
 
+  // 计算T_t_i_h_i
   Sophus::SE3<Scalar> T_t_i_h_i;
   T_t_i_h_i.so3() = T_w_i_t.so3().inverse() * T_w_i_h.so3();
   T_t_i_h_i.translation() =
       T_w_i_t.so3().inverse() * (T_w_i_h.translation() - T_w_i_t.translation());
 
-  Sophus::SE3<Scalar> tmp = tmp2 * T_t_i_h_i;
-  Sophus::SE3<Scalar> res = tmp * T_i_c_h;
+  Sophus::SE3<Scalar> tmp = tmp2 * T_t_i_h_i;   // tmp = T_t_c_h_i
+  Sophus::SE3<Scalar> res = tmp * T_i_c_h;      // res = T_t_c_h_i * T_i_c_h = T_t_c_h_c
 
+  // 右扰动，求相对位姿对 host frame 的导数
   if (d_rel_d_h) {
     Sophus::Matrix3<Scalar> R = T_w_i_h.so3().inverse().matrix();
 
@@ -65,6 +67,7 @@ Sophus::SE3<Scalar> computeRelPose(
     *d_rel_d_h = tmp.Adj() * RR;
   }
 
+  // 左扰动，求相对位姿对 target frame 的导数
   if (d_rel_d_t) {
     Sophus::Matrix3<Scalar> R = T_w_i_t.so3().inverse().matrix();
 

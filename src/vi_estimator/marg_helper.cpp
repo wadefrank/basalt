@@ -98,6 +98,7 @@ void MargHelper<Scalar_>::marginalizeHelperSqToSq(
   //      abs_H.bottomRightCorner(marg_size, marg_size)
   //          .jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
 
+  // 舒尔补
   // Eigen version of pseudoinverse
   auto H_mm_decomposition = abs_H.bottomRightCorner(marg_size, marg_size)
                                 .completeOrthogonalDecomposition();
@@ -269,6 +270,8 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
                                                 idx_to_marg.size());
 
   {
+    // 将H矩阵的变量重新排序，将保留的变量放在H矩阵的前面
+    // 遍历边缘化的变量
     auto it = idx_to_marg.begin();
     for (size_t i = 0; i < idx_to_marg.size(); i++) {
       indices[i] = *it;
@@ -276,6 +279,7 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
     }
   }
 
+  // 将要边缘化的变量放在H矩阵的后面
   {
     auto it = idx_to_keep.begin();
     for (size_t i = 0; i < idx_to_keep.size(); i++) {
@@ -285,6 +289,7 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
   }
 
   // TODO: check if using TranspositionMatrix is faster
+  // notice: PermutationWrapper是列主导，不是行主导
   const Eigen::PermutationWrapper<Eigen::Matrix<int, Eigen::Dynamic, 1>> p(
       indices);
 

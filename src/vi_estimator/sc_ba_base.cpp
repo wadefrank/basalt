@@ -252,22 +252,32 @@ void ScBundleAdjustmentBase<Scalar_>::linearizeHelperStatic(
       tbb::blocked_range<size_t>(0, obs_tcid_vec.size()),
       [&](const tbb::blocked_range<size_t>& range) {
         for (size_t r = range.begin(); r != range.end(); ++r) {
+          
+          // 获取主导帧的观测值
           auto kv = obs_to_lin.find(obs_tcid_vec[r]);
 
+          // 获取主导帧对应的hessian block
           RelLinData& rld = rld_vec[r];
 
           rld.error = Scalar(0);
 
+          // host camera0 id
           const TimeCamId& tcid_h = kv->first;
 
+          // 遍历所有的target frame
           for (const auto& obs_kv : kv->second) {
+            // 获取target frame id
             const TimeCamId& tcid_t = obs_kv.first;
+
             rld.order.emplace_back(std::make_pair(tcid_h, tcid_t));
 
             Mat4 T_t_h;
 
+            // host frame 和 target frame 的 id不相同
             if (tcid_h != tcid_t) {
               // target and host are not the same
+
+              // 获取host和target frame对应的imu位姿
               PoseStateWithLin state_h =
                   ba_base->getPoseStateWithLin(tcid_h.frame_id);
               PoseStateWithLin state_t =
@@ -275,11 +285,13 @@ void ScBundleAdjustmentBase<Scalar_>::linearizeHelperStatic(
 
               Mat6 d_rel_d_h, d_rel_d_t;
 
+              // 计算相对位姿
               SE3 T_t_h_sophus = computeRelPose(
                   state_h.getPoseLin(), ba_base->calib.T_i_c[tcid_h.cam_id],
                   state_t.getPoseLin(), ba_base->calib.T_i_c[tcid_t.cam_id],
                   &d_rel_d_h, &d_rel_d_t);
 
+              // 线性化点求雅可比矩阵
               rld.d_rel_d_h.emplace_back(d_rel_d_h);
               rld.d_rel_d_t.emplace_back(d_rel_d_t);
 
@@ -290,7 +302,7 @@ void ScBundleAdjustmentBase<Scalar_>::linearizeHelperStatic(
               }
 
               T_t_h = T_t_h_sophus.matrix();
-            } else {
+            } else {  // host和targe frame的id相同的情况
               T_t_h.setIdentity();
               rld.d_rel_d_h.emplace_back(Mat6::Zero());
               rld.d_rel_d_t.emplace_back(Mat6::Zero());
@@ -607,7 +619,9 @@ Eigen::VectorXd ScBundleAdjustmentBase<Scalar_>::checkNullspace(
   double eps = 0.01;
 
   // Compute nullspace increments
+  // 零空间检测
   for (const auto& kv : order.abs_order_map) {
+    // 对位姿各个分量施加扰动
     inc_x(kv.second.first + 0) = eps;
     inc_y(kv.second.first + 1) = eps;
     inc_z(kv.second.first + 2) = eps;
