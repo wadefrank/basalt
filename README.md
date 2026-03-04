@@ -45,7 +45,8 @@ sudo apt-get install basalt
 ### Source installation for Ubuntu >= 18.04 and MacOS >= 10.14 Mojave
 Clone the source code for the project and build it. For MacOS you should have [Homebrew](https://brew.sh/) installed.
 ```
-git clone --recursive https://gitlab.com/VladyslavUsenko/basalt.git
+# git clone --recursive https://gitlab.com/VladyslavUsenko/basalt.git
+git clone --recursive https://github.com/wadefrank/basalt.git
 cd basalt
 ./scripts/install_deps.sh
 mkdir build
