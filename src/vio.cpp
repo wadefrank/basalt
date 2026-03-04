@@ -34,15 +34,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 /**
- • Basalt VIO 系统主程序
-
- • 功能：基于优化的视觉惯性里程计系统，包含双目视觉前端+IMU紧耦合后端优化
-
- • 特点：支持数据集离线处理、实时显示、轨迹保存和性能分析
-
+ * Basalt VIO 系统主程序
+ * 功能：基于优化的视觉惯性里程计系统，包含双目视觉前端+IMU紧耦合后端优化
+ * 特点：支持数据集离线处理、实时显示、轨迹保存和性能分析
  */
 
-// C++基础库
+// 基础库
 #include <algorithm>            // 算法库
 #include <chrono>               // 时间库
 #include <condition_variable>   // 线程同步
@@ -53,11 +50,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <fmt/format.h>         // 字符串格式化
 #include <sophus/se3.hpp>       // 李群SE3操作
 
-// 并行计算（tbb）
+// 并行计算
 #include <tbb/concurrent_unordered_map.h> // 线程安全哈希表
 #include <tbb/global_control.h>           // TBB全局控制
 
-// 可视化库 (pangolin)
+// 可视化库 (Pangolin)
 #include <pangolin/display/default_font.h>
 #include <pangolin/display/image_view.h>    // 图像显示
 #include <pangolin/gl/gldraw.h>             // OpenGL绘制
@@ -655,9 +652,9 @@ int main(int argc, char** argv) {
       if (continue_btn) {
         // 执行单步前进
         if (!next_step())
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 短暂休眠
       } else {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));   // 默认休眠
       }
 
       // 快速连续模式
@@ -803,8 +800,9 @@ int main(int argc, char** argv) {
   return 0; // 程序正常退出
 }
 
-// 图像叠加绘制函数 - 在图像上显示特征点和光流信息
+// 使用Pangolin可视化库，在图像上叠加绘制特征点和光流信息
 void draw_image_overlay(pangolin::View& v, size_t cam_id) {
+  // 明确标记未使用的参数，避免编译器警告
   UNUSED(v);
 
   //  size_t frame_id = show_frame;
@@ -812,36 +810,65 @@ void draw_image_overlay(pangolin::View& v, size_t cam_id) {
   //      std::make_pair(vio_dataset->get_image_timestamps()[frame_id],
   //      cam_id);
 
+  // 获取当前需要显示的帧ID（来自全局变量）
   size_t frame_id = show_frame;
+
+  // 根据帧ID从数据集中获取对应的时间戳，并在可视化数据映射中查找该时刻的数据
+  // vis_map 的键是时间戳，值是该时刻对应的可视化数据结构指针
   auto it = vis_map.find(vio_dataset->get_image_timestamps()[frame_id]);
 
-  if (show_obs) {
-    glLineWidth(1.0);
-    glColor3f(1.0, 0.0, 0.0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  // ==================== 绘制特征点观测（show_obs）====================
+  if (show_obs) {   // 全局标志，控制是否绘制特征点
 
+    // 设置OpenGL绘制状态：线宽、颜色（红色）、开启透明度混合
+    glLineWidth(1.0);
+    glColor3f(1.0, 0.0, 0.0);   // 设置为红色
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  // 设置混合模式
+
+    // 检查：1. 找到了对应时间戳的数据；2. 相机ID在有效范围内
     if (it != vis_map.end() && cam_id < it->second->projections.size()) {
+      // 获取当前相机在当前帧的所有投影点（特征点）
+      // points 是一个向量，每个元素是一个 Vector4 或类似结构:
+      //   c[0], c[1] - 特征点在图像上的 (x, y) 坐标
+      //   c[2] - 归一化逆深度
+      //   c[3] - 特征点的 ID（用于文本显示，可能与c[2]相同）      
       const auto& points = it->second->projections[cam_id];
 
       if (points.size() > 0) {
-        double min_id = points[0][2], max_id = points[0][2];
+        // 第一步：计算所有相机中所有特征点归一化逆深度的范围（最小值和最大值）
+        // 归一化逆深度越大，特征点离相机越近；越小，离相机越远
+        double min_id = points[0][2], max_id = points[0][2];  // 用第一个点初始化
 
+
+        // 遍历所有相机 (it->second->projections) 的所有投影点
         for (const auto& points2 : it->second->projections)
           for (const auto& p : points2) {
             min_id = std::min(min_id, p[2]);
             max_id = std::max(max_id, p[2]);
           }
-
+        
+        // 第二步：遍历并绘制当前相机的所有特征点
         for (const auto& c : points) {
-          const float radius = 6.5;
+          const float radius = 6.5; // 绘制圆的半径
 
+
+          // 根据当前特征点归一化逆深度在[min_id, max_id]区间内的相对位置，计算一个颜色
+          // getcolor 函数参数：(当前值, 总值, 输出b, 输出g, 输出r)
+          // 这里传入 c[2]-min_id (当前值相对最小值的偏移) 和 max_id-min_id (总值)
+          // 颜色输出顺序为 b, g, r，但最终用 glColor3f(r, g, b) 设置，顺序正常。
+          // 纯红色-归一化逆深度最小值(≈0)              - 近点
+          // 黄色-归一化逆深度偏小值（p≈np/4）
+          // 青色-归一化逆深度中间和偏大值值（p≈np/2）
+          // 蓝色-归一化逆深度最大值(≈np）              - 远点
           float r, g, b;
-          getcolor(c[2] - min_id, max_id - min_id, b, g, r);
+          getcolor(c[2] - min_id, max_id - min_id, b, g, r);  // 注意：这里参数的顺序是bgr，而函数的参数是rgb，所以近点的颜色和远点的颜色要反过来
           glColor3f(r, g, b);
 
+          // 在特征点坐标(c[0], c[1])处绘制一个圆环
           pangolin::glDrawCirclePerimeter(c[0], c[1], radius);
 
+          // 如果开启显示ID文本，则在特征点旁边绘制其ID（整数形式）
           if (show_ids)
             pangolin::default_font().Text("%d", int(c[3])).Draw(c[0], c[1]);
         }
@@ -854,32 +881,49 @@ void draw_image_overlay(pangolin::View& v, size_t cam_id) {
     }
   }
 
-  if (show_flow) {
+  // ==================== 绘制光流Patch（show_flow）====================
+  if (show_flow) {  // 全局标志，控制是否绘制光流跟踪的patch
+    // 设置OpenGL绘制状态（同上）
     glLineWidth(1.0);
     glColor3f(1.0, 0.0, 0.0);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     if (it != vis_map.end()) {
+      // 获取当前相机下的光流观测结果
+      // kp_map 是一个映射：KeypointId -> AffineCompact2f (一个2D仿射变换)
+      // 这个变换描述了该特征点对应的图像小块(patch)从参考帧到当前帧的变化
       const Eigen::aligned_map<basalt::KeypointId, Eigen::AffineCompact2f>&
           kp_map = it->second->opt_flow_res->observations[cam_id];
 
+      // 遍历每一个被光流跟踪到的特征点
       for (const auto& kv : kp_map) {
+
+        // kv.first: 特征点ID (KeypointId)
+        // kv.second: 2D仿射变换 (AffineCompact2f)
+
+        // 将预定义的光流patch坐标（通常是一个局部网格）应用仿射变换
+        // 1. 线性部分（旋转、缩放、剪切）: kv.second.linear() * patch_coord
+        // 2. 平移部分: 为结果矩阵的每一列加上平移向量 kv.second.translation()
         Eigen::MatrixXf transformed_patch =
             kv.second.linear() * opt_flow_ptr->patch_coord;
         transformed_patch.colwise() += kv.second.translation();
 
+
+        // 绘制变换后的patch：将变换后的每个坐标点画一个小圆
         for (int i = 0; i < transformed_patch.cols(); i++) {
-          const Eigen::Vector2f c = transformed_patch.col(i);
-          pangolin::glDrawCirclePerimeter(c[0], c[1], 0.5f);
+          const Eigen::Vector2f c = transformed_patch.col(i); // 获取第i个点的坐标
+          pangolin::glDrawCirclePerimeter(c[0], c[1], 0.5f);  // 绘制半径很小的圆
         }
 
         const Eigen::Vector2f c = kv.second.translation();
 
+        // 如果开启显示ID，在特征点中心位置的右下方(偏移5像素)绘制其ID
         if (show_ids)
           pangolin::default_font().Text("%d", kv.first).Draw(5 + c[0], 5 + c[1]);
       }
 
+      // 在图像左上角(5, 20)位置绘制文本，显示当前光流跟踪到的patch数量
       pangolin::default_font()
           .Text("%d opt_flow patches", kp_map.size())
           .Draw(5, 20);
@@ -937,18 +981,40 @@ void draw_scene(pangolin::View& view) {
   pangolin::glDrawAxis(Sophus::SE3d().matrix(), 1.0);
 }
 
+/// @brief 从指定路径加载相机-IMU标定数据
+/// @param calib_path 标定文件的路径（JSON格式）
+/// @note 该函数依赖cereal序列化库读取JSON文件，若文件打开失败会直接终止程序
 void load_data(const std::string& calib_path) {
+  // 1. 以二进制模式打开标定文件
+  // std::ios::binary：以二进制模式打开，避免文本模式下的换行符转换等问题
+  // calib_path：传入的标定文件路径（如"./calib.json"）
   std::ifstream os(calib_path, std::ios::binary);
 
+  // 2. 检查文件是否成功打开
   if (os.is_open()) {
+
+    // 3. 创建cereal的JSON输入归档对象，关联已打开的文件流
+    // cereal::JSONInputArchive：cereal库用于读取JSON格式序列化数据的归档类
+    // 作用：将文件流中的JSON数据解析为C++对象
     cereal::JSONInputArchive archive(os);
+
+    // 4. 反序列化：将JSON数据读取到calib对象中
+    // archive(calib)：cereal会根据calib对象的类型（如之前的Calibration结构体）
+    // 自动匹配JSON中的字段并赋值，要求calib对象已实现cereal的序列化接口
     archive(calib);
+
+    // 5. 打印加载成功的日志，提示相机数量
+    // calib.intrinsics.size()：获取标定文件中配置的相机数量（支持多相机）    
     std::cout << "Loaded camera with " << calib.intrinsics.size() << " cameras"
               << std::endl;
 
   } else {
+    // 6. 文件打开失败时的错误处理
+    // 输出错误信息到标准错误流（std::cerr），提示具体的文件路径
     std::cerr << "could not load camera calibration " << calib_path
               << std::endl;
+
+    // 强制终止程序（std::abort()）：标定数据是核心依赖，加载失败无法继续运行
     std::abort();
   }
 }

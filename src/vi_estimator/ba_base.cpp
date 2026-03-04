@@ -356,24 +356,56 @@ Scalar_ BundleAdjustmentBase<Scalar_>::computeModelCostChange(
   return l_diff;
 }
 
+
+/**
+ * @brief 模板成员函数：计算BA优化中所有特征点在指定帧的投影坐标
+ * @tparam Scalar_ 外部类模板参数，BA优化的标量类型（如float/double）
+ * @tparam Scalar2 内部函数模板参数，输出数据的标量类型（可与Scalar_不同，适配可视化/存储需求）
+ * @param[out] data 输出参数，存储各相机的特征点投影结果
+ *                  维度：[相机ID][特征点索引] -> 4维向量 [x, y, 归一化逆深度, keypoint_id]
+ * @param last_state_t_ns 指定的目标帧ID（时间戳，单位ns），仅计算该帧的投影
+ * 
+ * 核心功能：
+ * 1. 遍历所有观测数据，筛选出目标帧(last_state_t_ns)的特征点观测
+ * 2. 计算特征点从参考帧到目标帧的相对位姿变换
+ * 3. 根据相机内参类型（多态），线性化投影模型并计算特征点在图像平面的投影坐标
+ * 4. 将投影结果存储到输出容器中，附带特征点ID信息
+ */
 template <class Scalar_>
 template <class Scalar2>
 void BundleAdjustmentBase<Scalar_>::computeProjections(
     std::vector<Eigen::aligned_vector<Eigen::Matrix<Scalar2, 4, 1>>>& data,
     FrameId last_state_t_ns) const {
+
+  // 遍历LMDB数据库中所有的观测数据（LMDB：轻量级数据库，存储特征点-帧的关联关系）
+  // kv.first: 参考帧的TimeCamId（时间戳+相机ID）
+  // kv.second: 该参考帧关联的所有目标帧观测
   for (const auto& kv : lmdb.getObservations()) {
+
+    // 参考帧的时间戳+相机ID（tcid_h: t=time, c=cam, h=host）
     const TimeCamId& tcid_h = kv.first;
 
+
+    // 遍历参考帧关联的每一个目标帧观测
+    // obs_kv.first: 目标帧的TimeCamId
+    // obs_kv.second: 该目标帧下的所有特征点ID列表
     for (const auto& obs_kv : kv.second) {
       const TimeCamId& tcid_t = obs_kv.first;
 
       if (tcid_t.frame_id != last_state_t_ns) continue;
 
+      // 定义4x4位姿变换矩阵：T_t_h 表示从参考帧h到目标帧t的变换（T_t_h * P_h = P_t）
       Mat4 T_t_h;
+      // 如果参考帧和目标帧不是同一帧，计算相对位姿；否则位姿矩阵为单位矩阵
       if (tcid_h != tcid_t) {
+        // 获取参考帧h的位姿状态（包含SE3位姿+线性化增量）
         PoseStateWithLin<Scalar> state_h = getPoseStateWithLin(tcid_h.frame_id);
+        // 获取目标帧t的位姿状态
         PoseStateWithLin<Scalar> state_t = getPoseStateWithLin(tcid_t.frame_id);
 
+        // 计算参考帧到目标帧的相对位姿（考虑相机外参）
+        // 输入：参考帧位姿、参考相机外参(T_i_c: 相机到IMU的变换)、目标帧位姿、目标相机外参
+        // 输出：SE3格式的相对位姿 T_t_h_sophus (T_t_h = T_t_imu * T_imu_h)
         Sophus::SE3<Scalar> T_t_h_sophus =
             computeRelPose(state_h.getPose(), calib.T_i_c[tcid_h.cam_id],
                            state_t.getPose(), calib.T_i_c[tcid_t.cam_id]);
@@ -383,15 +415,32 @@ void BundleAdjustmentBase<Scalar_>::computeProjections(
         T_t_h.setIdentity();
       }
 
+      // 多态相机内参处理：std::visit遍历variant类型的相机内参（如针孔/鱼眼/等距相机）
+      // calib.intrinsics[tcid_t.cam_id].variant: 目标相机的内参变体（不同相机模型）
       std::visit(
           [&](const auto& cam) {
+            // 遍历目标帧下的每一个特征点ID
             for (KeypointId kpt_id : obs_kv.second) {
+              // 从LMDB数据库中获取该特征点（路标点）的3D坐标（世界系/参考帧系）
               const Keypoint<Scalar>& kpt_pos = lmdb.getLandmark(kpt_id);
+              
+              // 临时变量：投影残差（此处未使用，传Zero()）、4维投影结果
+              Vec2 res;     // 2D投影残差 (观测值-预测值)
+              Vec4 proj;    // 4维投影结果 [x, y, landmark_id, keypoint_id]
 
-              Vec2 res;
-              Vec4 proj;
-
+              // 推导相机类型（去除cv/引用，得到原始相机类型，如PinholeCamera）
               using CamT = std::decay_t<decltype(cam)>;
+
+              // 线性化特征点投影模型，计算投影坐标
+              // 参数说明：
+              // - Vec2::Zero(): 残差初始值（未使用）
+              // - kpt_pos: 3D路标点坐标
+              // - T_t_h: 参考帧到目标帧的位姿变换
+              // - cam: 目标相机的内参模型
+              // - res: 输出投影残差（未使用）
+              // - nullptr: 不输出雅可比矩阵（BA计算时才需要）
+              // - nullptr: 不输出海森矩阵
+              // - &proj: 输出4维投影结果 [x, y, 归一化逆深度, 0]
               linearizePoint<Scalar, CamT>(Vec2::Zero(), kpt_pos, T_t_h, cam,
                                            res, nullptr, nullptr, &proj);
 

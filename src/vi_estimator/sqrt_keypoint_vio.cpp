@@ -147,6 +147,12 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(
   initialize(bg, ba);
 }
 
+/**
+ * @brief VIO估计器初始化函数
+ * @tparam Scalar_ 模板参数，数值类型（如float/double）
+ * @param bg_ 陀螺仪偏置初始值（double类型）
+ * @param ba_ 加速度计偏置初始值（double类型）
+ */
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
                                                    const Eigen::Vector3d& ba_) {
@@ -167,14 +173,18 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
     data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
     data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
 
+    // 主循环：持续处理视觉帧和IMU数据
     while (true) {
+      // 从视觉数据队列中取出当前帧
       vision_data_queue.pop(curr_frame);
-
+      
+      // 如果开启实时性强制模式：清空队列中多余的帧，只保留最新的一帧
       if (config.vio_enforce_realtime) {
         // drop current frame if another frame is already in the queue.
         while (!vision_data_queue.empty()) vision_data_queue.pop(curr_frame);
       }
 
+      // 如果当前帧为空（队列已空），退出循环
       if (!curr_frame.get()) {
         break;
       }
@@ -182,48 +192,72 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
       // Correct camera time offset
       // curr_frame->t_ns += calib.cam_time_offset_ns;
 
+      // -------------------------- VIO系统初始化逻辑 --------------------------
       if (!initialized) {
+        // 跳过所有时间戳早于当前视觉帧的IMU数据，找到与当前帧时间匹配的IMU数据
         while (data->t_ns < curr_frame->t_ns) {
+          // 从IMU队列中取出IMU数据
           data = popFromImuDataQueue();
+          
+          // IMU数据为空则退出循环
           if (!data) break;
+
+          // 对新取出的IMU数据进行标定
           data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
           // std::cout << "Skipping IMU data.." << std::endl;
         }
 
+        // 初始化机体在世界坐标系下的初始速度（初始化为零）
         Vec3 vel_w_i_init;
         vel_w_i_init.setZero();
-
+        
+        // 初始化机体姿态：利用IMU加速度计数据（重力方向）计算初始旋转
+        // FromTwoVectors：将IMU测量的加速度方向（data->accel）旋转到世界坐标系Z轴（重力方向）
         T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(
             data->accel, Vec3::UnitZ()));
 
+        // 记录最后一个状态的时间戳（当前视觉帧的时间戳）
         last_state_t_ns = curr_frame->t_ns;
+
+        // 初始化IMU预积分数据：存储初始时间戳、陀螺仪/加速度计偏置
         imu_meas[last_state_t_ns] =
             IntegratedImuMeasurement<Scalar>(last_state_t_ns, bg, ba);
+
+        // 初始化帧状态：包含姿态、速度、偏置等信息
+        // PoseVelBiasStateWithLin：带线性化的位姿-速度-偏置状态类
         frame_states[last_state_t_ns] = PoseVelBiasStateWithLin<Scalar>(
             last_state_t_ns, T_w_i_init, vel_w_i_init, bg, ba, true);
 
+        // 初始化边缘化数据结构（用于滑动窗口优化的边缘化）
+        // abs_order_map：记录状态的绝对索引和维度
         marg_data.order.abs_order_map[last_state_t_ns] =
             std::make_pair(0, POSE_VEL_BIAS_SIZE);
-        marg_data.order.total_size = POSE_VEL_BIAS_SIZE;
-        marg_data.order.items = 1;
+        marg_data.order.total_size = POSE_VEL_BIAS_SIZE;  // 状态总维度
+        marg_data.order.items = 1;                        // 状态数量
 
+        // 输出初始化信息（调试用）
         std::cout << "Setting up filter: t_ns " << last_state_t_ns << std::endl;
         std::cout << "T_w_i\n" << T_w_i_init.matrix() << std::endl;
         std::cout << "vel_w_i " << vel_w_i_init.transpose() << std::endl;
 
+        // 如果开启调试/扩展日志，记录边缘化零空间
         if (config.vio_debug || config.vio_extended_logging) {
           logMargNullspace();
         }
 
+        // 标记VIO系统已初始化完成
         initialized = true;
       }
 
+      // -------------------------- IMU预积分逻辑 --------------------------
+      // 如果存在上一帧（初始化完成后），开始处理IMU预积分
       if (prev_frame) {
         // preintegrate measurements
-
+        // 获取上一个状态（用于IMU预积分的初始偏置）
         auto last_state = frame_states.at(last_state_t_ns);
 
+        // 初始化IMU预积分对象：以上一帧时间戳、上一状态的偏置为初始值
         meas.reset(new IntegratedImuMeasurement<Scalar>(
             prev_frame->t_ns, last_state.getState().bias_gyro,
             last_state.getState().bias_accel));
@@ -232,6 +266,7 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
                           "duplicate frame timestamps?! zero time delta leads "
                           "to invalid IMU integration.");
 
+        // 跳过所有时间戳早于/等于上一帧的IMU数据
         while (data->t_ns <= prev_frame->t_ns) {
           data = popFromImuDataQueue();
           if (!data) break;
@@ -239,36 +274,46 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
         }
 
+        // 积分所有时间戳在[上一帧, 当前帧]范围内的IMU数据
         while (data->t_ns <= curr_frame->t_ns) {
-          meas->integrate(*data, accel_cov, gyro_cov);
+          meas->integrate(*data, accel_cov, gyro_cov);  // 执行IMU预积分
           data = popFromImuDataQueue();
           if (!data) break;
           data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
         }
 
+        // 处理时间戳超出当前帧的情况：补全最后一段积分到当前帧时间戳
         if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
-          if (!data.get()) break;
+          if (!data.get()) break; // IMU数据为空则退出
+          // 临时修改IMU数据的时间戳为当前帧时间戳，补全积分
           int64_t tmp = data->t_ns;
           data->t_ns = curr_frame->t_ns;
           meas->integrate(*data, accel_cov, gyro_cov);
-          data->t_ns = tmp;
+          data->t_ns = tmp; // 恢复原时间戳
         }
       }
 
+      // -------------------------- 视觉-IMU融合 --------------------------
+      // 调用measure函数：融合当前视觉帧和IMU预积分数据，更新VIO状态
       measure(curr_frame, meas);
       prev_frame = curr_frame;
     }
 
-    if (out_vis_queue) out_vis_queue->push(nullptr);
-    if (out_marg_queue) out_marg_queue->push(nullptr);
-    if (out_state_queue) out_state_queue->push(nullptr);
+    // -------------------------- 清理和结束逻辑 --------------------------
+    // 向输出队列推送空指针，通知其他模块处理结束
+    if (out_vis_queue) out_vis_queue->push(nullptr);      // 视觉输出队列
+    if (out_marg_queue) out_marg_queue->push(nullptr);    // 边缘化输出队列
+    if (out_state_queue) out_state_queue->push(nullptr);  // 状态输出队列
 
+    // 标记处理线程已完成
     finished = true;
 
+    // 输出完成信息
     std::cout << "Finished VIOFilter " << std::endl;
   };
 
+  // 创建并启动处理线程：将proc_func作为线程入口函数
   processing_thread.reset(new std::thread(proc_func));
 }
 
@@ -302,64 +347,103 @@ SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueue() {
   }
 }
 
+/**
+ * @brief VIO核心测量函数：融合IMU预积分数据和视觉光流观测，完成状态预测、关键帧判定、特征三角化、优化与边缘化
+ * @tparam Scalar_ 数值类型模板参数（如float/double）
+ * @param opt_flow_meas 视觉光流观测结果指针（包含特征点观测、时间戳等）
+ * @param meas IMU预积分测量值指针（两帧间的IMU积分结果，可为空）
+ * @return 函数执行状态（固定返回true，表示执行成功）
+ */
 template <class Scalar_>
 bool SqrtKeypointVioEstimator<Scalar_>::measure(
     const OpticalFlowResult::Ptr& opt_flow_meas,
     const typename IntegratedImuMeasurement<Scalar>::Ptr& meas) {
+  // 统计信息：记录当前帧的时间戳（用于性能分析/日志），format("none")表示不格式化输出
   stats_sums_.add("frame_id", opt_flow_meas->t_ns).format("none");
+
+  // 总耗时计时器
   Timer t_total;
 
+  // -------------------------- 1. IMU预积分状态预测 --------------------------
   if (meas.get()) {
+    // 断言检查：确保状态时间戳与IMU预积分起始时间戳一致
     BASALT_ASSERT(frame_states[last_state_t_ns].getState().t_ns ==
                   meas->get_start_t_ns());
+    
+    // 断言检查：确保视觉帧时间戳 = IMU预积分起始时间 + 积分时长（时间对齐）
     BASALT_ASSERT(opt_flow_meas->t_ns ==
                   meas->get_dt_ns() + meas->get_start_t_ns());
+    
+    // 断言检查：IMU预积分时长必须大于0（避免零时间差）
     BASALT_ASSERT(meas->get_dt_ns() > 0);
 
+    // 获取上一帧的状态（位姿、速度、偏置），作为预测初始值
     PoseVelBiasState<Scalar> next_state =
         frame_states.at(last_state_t_ns).getState();
 
+    // 利用IMU预积分数据预测当前帧的状态（输入：上一状态、重力向量g；输出：当前预测状态next_state）
     meas->predictState(frame_states.at(last_state_t_ns).getState(), g,
                        next_state);
-
+    
+    // 更新最后一个状态的时间戳为当前视觉帧时间戳
     last_state_t_ns = opt_flow_meas->t_ns;
+
+    // 设置预测状态的时间戳为当前视觉帧时间戳
     next_state.t_ns = opt_flow_meas->t_ns;
 
+    // 将预测的当前状态存入帧状态字典（带线性化的状态结构）
     frame_states[last_state_t_ns] = PoseVelBiasStateWithLin<Scalar>(next_state);
 
+    // 保存IMU预积分数据（以起始时间戳为键）
     imu_meas[meas->get_start_t_ns()] = *meas;
   }
 
   // save results
+  // -------------------------- 2. 保存视觉光流结果 --------------------------
+  // 将当前帧的光流观测结果存入字典（以时间戳为键），供后续三角化/投影使用
   prev_opt_flow_res[opt_flow_meas->t_ns] = opt_flow_meas;
 
+  // -------------------------- 3. 关联已有3D路标点与当前帧观测 --------------------------
   // Make new residual for existing keypoints
-  int connected0 = 0;
-  std::map<int64_t, int> num_points_connected;
-  std::unordered_set<int> unconnected_obs0;
+  int connected0 = 0;                             // 相机0中与已有3D点关联的特征点数量
+  std::map<int64_t, int> num_points_connected;    // 各帧关联的特征点数量（用于边缘化）
+  std::unordered_set<int> unconnected_obs0;       // 相机0中未关联3D点的特征点ID
+
+  // 遍历当前帧所有相机的光流观测（i为相机索引）
   for (size_t i = 0; i < opt_flow_meas->observations.size(); i++) {
+    // 构建当前观测的时间-相机ID（唯一标识某一相机的某一帧）
     TimeCamId tcid_target(opt_flow_meas->t_ns, i);
 
+    // 遍历当前相机的所有特征点观测（kv_obs: 特征点ID -> 观测坐标）
     for (const auto& kv_obs : opt_flow_meas->observations[i]) {
       int kpt_id = kv_obs.first;
 
+      // 如果该特征点已存在对应的3D路标点（lmdb是路标点数据库）
       if (lmdb.landmarkExists(kpt_id)) {
+        // 获取该路标点的主关键帧ID（生成该3D点的关键帧）
         const TimeCamId& tcid_host = lmdb.getLandmark(kpt_id).host_kf_id;
 
+        // 构建特征点观测结构体（存储ID和归一化坐标）
         KeypointObservation<Scalar> kobs;
         kobs.kpt_id = kpt_id;
+
+        // 将观测坐标（可能是齐次坐标）转换为模板类型的平移部分（归一化平面坐标）
         kobs.pos = kv_obs.second.translation().cast<Scalar>();
 
+        // 将该观测关联添加到路标点数据库
         lmdb.addObservation(tcid_target, kobs);
         // obs[tcid_host][tcid_target].push_back(kobs);
 
+        // 统计各主关键帧关联的特征点数量
         if (num_points_connected.count(tcid_host.frame_id) == 0) {
           num_points_connected[tcid_host.frame_id] = 0;
         }
         num_points_connected[tcid_host.frame_id]++;
 
+        // 如果是相机0，统计关联的特征点数量
         if (i == 0) connected0++;
       } else {
+        // 如果是相机0且无对应3D点，加入未关联集合（后续用于三角化）
         if (i == 0) {
           unconnected_obs0.emplace(kpt_id);
         }
@@ -367,59 +451,77 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
     }
   }
 
-  // 关键帧判断条件：
-  //     1. 跟踪到的3d点 / (跟踪到的3d点+未跟踪到的3d点) < 阈值
-  //     2. 离上一帧关键帧的帧数 > 阈值
+  // -------------------------- 4. 关键帧判定 --------------------------
+  // 关键帧判断条件（满足其一则选为关键帧）：
+  //     1. 跟踪到的3d点 / (跟踪到的3d点+未跟踪到的3d点) < 阈值 【1. 相机0中已关联3D点的特征点占比 < 阈值（跟踪质量下降）】
+  //     2. 离上一帧关键帧的帧数 > 阈值                       【2. 距离上一关键帧的帧数 > 最小间隔帧数（保证关键帧分布）】
   if (Scalar(connected0) / (connected0 + unconnected_obs0.size()) <
           Scalar(config.vio_new_kf_keypoints_thresh) &&
       frames_after_kf > config.vio_min_frames_after_kf)
     take_kf = true;
 
+  // 调试模式下输出关联/未关联特征点数量
   if (config.vio_debug) {
     std::cout << "connected0 " << connected0 << " unconnected0 "
               << unconnected_obs0.size() << std::endl;
   }
 
+  // -------------------------- 5. 关键帧处理：三角化新3D路标点 --------------------------
   if (take_kf) {
     // Triangulate new points from one of the observations (with sufficient
     // baseline) and make keyframe for camera 0
-    take_kf = false;
-    frames_after_kf = 0;
-    kf_ids.emplace(last_state_t_ns);
+    take_kf = false;                  // 重置关键帧标记
+    frames_after_kf = 0;              // 重置关键帧后帧数计数
+    kf_ids.emplace(last_state_t_ns);  // 记录关键帧时间戳
 
+    // 构建当前关键帧的时间-相机ID（相机0为主相机）
     TimeCamId tcidl(opt_flow_meas->t_ns, 0);
 
-    int num_points_added = 0;
+    int num_points_added = 0;         // 本次关键帧三角化成功的3D点数量
+
+    // 遍历相机0中所有未关联3D点的特征点（需要三角化的特征点）
     for (int lm_id : unconnected_obs0) {
       // Find all observations
+      // 收集该特征点在所有历史帧中的观测（用于三角化）
       std::map<TimeCamId, KeypointObservation<Scalar>> kp_obs;
 
+      // 遍历所有保存的光流结果（历史帧）
       for (const auto& kv : prev_opt_flow_res) {
+        // 遍历历史帧的所有相机
         for (size_t k = 0; k < kv.second->observations.size(); k++) {
+          // 查找该特征点在历史帧当前相机中的观测
           auto it = kv.second->observations[k].find(lm_id);
           if (it != kv.second->observations[k].end()) {
+            // 构建历史帧的时间-相机ID
             TimeCamId tcido(kv.first, k);
 
+            // 构建特征点观测结构体
             KeypointObservation<Scalar> kobs;
             kobs.kpt_id = lm_id;
             kobs.pos = it->second.translation().template cast<Scalar>();
 
             // obs[tcidl][tcido].push_back(kobs);
+            // 存入该特征点的多帧观测集合
             kp_obs[tcido] = kobs;
           }
         }
       }
 
+      // -------------------------- 5.1 特征点三角化 --------------------------
       // triangulate
       // 通过三角化恢复当前帧的特征点的逆深度
-      bool valid_kp = false;
+      bool valid_kp = false;  // 该特征点是否三角化成功
+      // 三角化最小基线距离平方（避免基线过短导致三角化精度低）
       const Scalar min_triang_distance2 =
           Scalar(config.vio_min_triangulation_dist *
                  config.vio_min_triangulation_dist);
-      for (const auto& kv_obs : kp_obs) {
-        if (valid_kp) break;
-        TimeCamId tcido = kv_obs.first;
 
+      // 遍历该特征点的所有历史观测，寻找满足基线要求的观测对
+      for (const auto& kv_obs : kp_obs) {
+        if (valid_kp) break;              // 三角化成功则跳过
+        TimeCamId tcido = kv_obs.first;   // 历史观测的时间-相机ID
+
+        // 获取当前关键帧（相机0）和历史帧（对应相机）的特征点归一化坐标
         const Vec2 p0 = opt_flow_meas->observations.at(0)
                             .at(lm_id)
                             .translation()
@@ -430,102 +532,158 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
                             .translation()
                             .template cast<Scalar>();
 
+        // 将归一化平面坐标反投影为相机坐标系下的射线（齐次坐标）
         Vec4 p0_3d, p1_3d;
         bool valid1 = calib.intrinsics[0].unproject(p0, p0_3d);
         bool valid2 = calib.intrinsics[tcido.cam_id].unproject(p1, p1_3d);
         if (!valid1 || !valid2) continue;
 
+        // 计算两帧IMU坐标系的相对位姿：T_i0_i1 = T_w_i1 * T_w_i0^{-1}
         SE3 T_i0_i1 = getPoseStateWithLin(tcidl.frame_id).getPose().inverse() *
                       getPoseStateWithLin(tcido.frame_id).getPose();
+        
+        // 转换为相机坐标系的相对位姿：T_0_1 = T_c0_i0 * T_i0_i1 * T_i1_c1
         SE3 T_0_1 =
             calib.T_i_c[0].inverse() * T_i0_i1 * calib.T_i_c[tcido.cam_id];
 
+        // 检查基线长度：小于最小阈值则跳过（三角化精度不足）
         if (T_0_1.translation().squaredNorm() < min_triang_distance2) continue;
 
+        // 三角化计算3D点坐标（齐次坐标，p0_triangulated[3]为逆深度）
         Vec4 p0_triangulated = triangulate(p0_3d.template head<3>(),
                                            p1_3d.template head<3>(), T_0_1);
 
+        // 三角化结果有效性检查：
+        // 1. 所有元素为有限值（非NaN/Inf）；2. 逆深度>0且<3.0（合理范围）
         // 将成功恢复逆深度的3d点加入到landmark数据库
         if (p0_triangulated.array().isFinite().all() &&
             p0_triangulated[3] > 0 && p0_triangulated[3] < 3.0) {
+          // 构建3D路标点结构体
           Keypoint<Scalar> kpt_pos;
-          kpt_pos.host_kf_id = tcidl;
+          kpt_pos.host_kf_id = tcidl; // 主关键帧为当前关键帧
+          // 将三角化结果投影为球极坐标（用于逆深度参数化）
           kpt_pos.direction =
               StereographicParam<Scalar>::project(p0_triangulated);
-          kpt_pos.inv_dist = p0_triangulated[3];
+          kpt_pos.inv_dist = p0_triangulated[3];  // 逆深度
+
+          // 将3D路标点添加到数据库
           lmdb.addLandmark(lm_id, kpt_pos);
 
-          num_points_added++;
-          valid_kp = true;
+          num_points_added++;   // 统计成功数量
+          valid_kp = true;      // 标记三角化成功
         }
       }
 
+      // -------------------------- 5.2 保存三角化成功的观测关联 --------------------------
       // 将视觉测量关系加入到数据库
       if (valid_kp) {
+        // 将该特征点的所有历史观测关联添加到数据库
         for (const auto& kv_obs : kp_obs) {
           lmdb.addObservation(kv_obs.first, kv_obs.second);
         }
       }
     }
 
+    // 记录当前关键帧三角化成功的3D点数量
     num_points_kf[opt_flow_meas->t_ns] = num_points_added;
   } else {
+    // 非关键帧：累计关键帧后帧数
     frames_after_kf++;
   }
 
+  // -------------------------- 6. 标记丢失的路标点（用于边缘化） --------------------------
   std::unordered_set<KeypointId> lost_landmaks;
-  if (config.vio_marg_lost_landmarks) {
+  if (config.vio_marg_lost_landmarks) { // 如果开启丢失路标点边缘化
+
+    // 遍历所有路标点
     for (const auto& kv : lmdb.getLandmarks()) {
       bool connected = false;
+      // 检查该路标点是否在当前帧有观测
       for (size_t i = 0; i < opt_flow_meas->observations.size(); i++) {
         if (opt_flow_meas->observations[i].count(kv.first) > 0)
           connected = true;
       }
+      // 无观测则标记为丢失
       if (!connected) {
         lost_landmaks.emplace(kv.first);
       }
     }
   }
 
+  // -------------------------- 7. 优化与边缘化 --------------------------
+  // 输入：各帧关联特征点数量、丢失路标点；执行滑动窗口优化+边缘化
   optimize_and_marg(num_points_connected, lost_landmaks);
 
-  if (out_state_queue) {
+  // -------------------------- 8. 输出当前状态（供外部模块使用） --------------------------
+
+  if (out_state_queue) {  // 如果状态输出队列非空
+    // 获取当前帧的状态（带线性化）
     PoseVelBiasStateWithLin p = frame_states.at(last_state_t_ns);
 
+    // 转换为double类型（外部模块常用精度），封装为智能指针
     typename PoseVelBiasState<double>::Ptr data(
         new PoseVelBiasState<double>(p.getState().template cast<double>()));
 
+    // 推送状态到输出队列
     out_state_queue->push(data);
   }
 
+    // -------------------------- 9. 可视化数据封装与输出 --------------------------
+  // 如果开启可视化功能（out_vis_queue非空，表示需要向可视化线程推送数据）
   if (out_vis_queue) {
+
+    // 步骤1：创建可视化数据对象（智能指针管理，避免内存泄漏）
+    // VioVisualizationData是自定义结构体，存储一帧的所有可视化所需数据
     VioVisualizationData::Ptr data(new VioVisualizationData);
 
+    // 步骤2：设置当前可视化帧的时间戳（单位：纳秒），关联到最后一个状态帧
     data->t_ns = last_state_t_ns;
 
+    // 步骤3：封装所有帧的状态位姿（T_w_i：世界坐标系到IMU坐标系的变换）
+    // frame_states：存储各帧的状态信息（含位姿、速度、偏置等）
     for (const auto& kv : frame_states) {
+      // 将位姿从优化用的标量类型（如float）转换为double（可视化常用精度），存入states数组
       data->states.emplace_back(
           kv.second.getState().T_w_i.template cast<double>());
     }
 
+    // 步骤4：封装所有帧的纯位姿数据（仅SE3位姿，不含状态信息）
+    // frame_poses：存储各帧的相机/IMU纯位姿，用于可视化轨迹
     for (const auto& kv : frame_poses) {
       data->frames.emplace_back(kv.second.getPose().template cast<double>());
     }
 
+    // 步骤5：获取当前帧的3D特征点坐标及对应的ID
+    // get_current_points：自定义函数，提取需要可视化的特征点（路标点）的3D坐标和ID
+    // data->points：存储特征点3D坐标，data->point_ids：存储特征点唯一标识，用于关联/上色
     get_current_points(data->points, data->point_ids);
 
+    // 步骤6：初始化投影结果容器，大小匹配光流观测的相机数量
+    // opt_flow_meas->observations.size()：当前帧参与光流优化的相机数量
     data->projections.resize(opt_flow_meas->observations.size());
+
+    // 核心：计算指定帧（last_state_t_ns）下所有特征点在各相机的投影坐标
+    // computeProjections：你之前重点分析的函数，输出包含2D投影坐标+归一化逆深度的4维向量
+    // 投影结果存入data->projections，后续用于Pangolin绘制图像平面的特征点
     computeProjections(data->projections, last_state_t_ns);
 
+    // 步骤7：封装当前帧的光流优化残差（用于可视化残差分布/大小）
+    // prev_opt_flow_res：存储各帧光流优化后的残差值，反映特征点跟踪精度
     data->opt_flow_res = prev_opt_flow_res[last_state_t_ns];
 
+    // 步骤8：将封装好的可视化数据推送到可视化队列
+    // out_vis_queue：多线程安全队列，可视化线程从队列中取数据并绘制（避免主线程阻塞）
     out_vis_queue->push(data);
   }
 
+  // -------------------------- 10. 收尾工作 --------------------------
+  // 更新最后处理的时间戳
   last_processed_t_ns = last_state_t_ns;
 
+  // 统计measure函数总耗时（单位：毫秒）
   stats_sums_.add("measure", t_total.elapsed()).format("ms");
 
+  // 函数执行成功，返回true
   return true;
 }
 

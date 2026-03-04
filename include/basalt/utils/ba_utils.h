@@ -82,6 +82,28 @@ Sophus::SE3<Scalar> computeRelPose(
   return res;
 }
 
+
+/**
+ * @brief 内联函数：线性化特征点投影模型，计算投影残差及雅可比矩阵（BA核心函数）
+ * @tparam Scalar 标量类型（float/double），保证与相机模型标量类型一致
+ * @tparam CamT 相机模型类型（如针孔相机、鱼眼相机等，需实现project接口）
+ * @param kpt_obs 特征点的观测坐标（图像平面2D坐标，用于计算残差）
+ * @param kpt_pos 特征点（路标点）的参数化表示（立体投影坐标+逆深度）
+ * @param T_t_h 4x4齐次变换矩阵：从参考帧h到目标帧t的位姿变换 (T_t_h * P_h = P_t)
+ * @param cam 相机内参模型（多态，支持不同相机投影模型）
+ * @param[out] res 输出投影残差 = 投影预测值 - 观测值（2D向量）
+ * @param[out] d_res_d_xi 可选输出：残差对位姿的雅可比矩阵 (2xPOSE_SIZE)，POSE_SIZE通常为6（3平移+3旋转）
+ * @param[out] d_res_d_p 可选输出：残差对3D点坐标的雅可比矩阵 (2x3)
+ * @param[out] proj 可选输出：4维投影结果 [x, y, 归一化逆深度, 预留]
+ * @return bool 投影是否有效（true=有效，false=无效/超出图像范围/数值异常）
+ * 
+ * 核心流程：
+ * 1. 立体投影逆变换：将特征点的方向向量转换为3D齐次坐标（带逆深度）
+ * 2. 位姿变换：将参考帧的3D点转换到目标帧坐标系
+ * 3. 相机投影：将目标帧3D点投影到图像平面，得到预测坐标
+ * 4. 残差计算：预测坐标 - 观测坐标
+ * 5. 雅可比计算：（可选）计算残差对位姿/3D点的雅可比矩阵（用于BA优化）
+ */
 template <class Scalar, class CamT>
 inline bool linearizePoint(
     const Eigen::Matrix<Scalar, 2, 1>& kpt_obs, const Keypoint<Scalar>& kpt_pos,
@@ -90,20 +112,43 @@ inline bool linearizePoint(
     Eigen::Matrix<Scalar, 2, POSE_SIZE>* d_res_d_xi = nullptr,
     Eigen::Matrix<Scalar, 2, 3>* d_res_d_p = nullptr,
     Eigen::Matrix<Scalar, 4, 1>* proj = nullptr) {
+
+  // 静态断言：确保相机模型的标量类型与函数模板标量类型一致，避免精度不匹配
   static_assert(std::is_same_v<typename CamT::Scalar, Scalar>);
 
   // Todo implement without jacobians
+  // Todo: 待优化：实现无雅可比的轻量版本（仅计算投影坐标，不计算导数）
+  // 临时变量：立体投影逆变换的雅可比矩阵（4x2），存储unproject的导数
   Eigen::Matrix<Scalar, 4, 2> Jup;
+
+  // 参考帧下的3D齐次点坐标（前3维为方向，第4维为逆深度）
   Eigen::Matrix<Scalar, 4, 1> p_h_3d;
+
+  // 步骤1：立体投影逆变换（unproject）
+  // 将特征点的2D方向向量（kpt_pos.direction）转换为3D齐次坐标
+  // Jup：输出unproject操作的雅可比矩阵（4x2），用于后续残差对方向的导数计算
   p_h_3d = StereographicParam<Scalar>::unproject(kpt_pos.direction, &Jup);
+
+  // 第4维赋值为逆深度（inv_dist），完整表示参考帧下的3D点（逆深度参数化）
   p_h_3d[3] = kpt_pos.inv_dist;
 
+  // 步骤2：位姿变换
+  // 将参考帧h的3D点转换到目标帧t的坐标系下（T_t_h为h->t的变换矩阵）
   const Eigen::Matrix<Scalar, 4, 1> p_t_3d = T_t_h * p_h_3d;
 
+  // 临时变量：相机投影的雅可比矩阵（2x4），存储project的导数
   Eigen::Matrix<Scalar, 2, 4> Jp;
+
+  // 步骤3：相机投影
+  // 将目标帧的3D齐次点投影到图像平面，得到预测坐标（存入res）
+  // Jp：输出project操作的雅可比矩阵（2x4），res初始为投影预测值
+  // valid：标记投影是否有效（如是否在图像范围内、无数值异常）
   bool valid = cam.project(p_t_3d, res, &Jp);
+
+  // 额外检查：投影结果是否为有限值（排除NaN/Inf）
   valid &= res.array().isFinite().all();
 
+  // 投影无效处理：返回false，跳过该特征点的优化
   if (!valid) {
     //      std::cerr << " Invalid projection! kpt_pos.dir "
     //                << kpt_pos.dir.transpose() << " kpt_pos.id " <<
@@ -117,32 +162,59 @@ inline bool linearizePoint(
     return false;
   }
 
+  // 可选：填充投影结果（proj参数非空时）
   if (proj) {
+    // proj前2维：图像平面的投影预测坐标
     proj->template head<2>() = res;
+    // 对逆深度进行归一化，主要用于可视化，作用：
+    // 1.消除 SLAM 的尺度不确定性，让不同帧 / 场景的特征点可统一可视化
+    // 2.压缩数值范围，避免颜色映射失真，清晰区分近 / 中 / 远特征点
+    // 3.提升数值稳定性，过滤极端值，避免可视化 / 优化异常
     (*proj)[2] = p_t_3d[3] / p_t_3d.template head<3>().norm();
   }
+
+
+  // 步骤4：计算残差 = 投影预测值 - 观测值（BA优化的核心残差）
   res -= kpt_obs;
 
+  // 步骤5.1：计算残差对位姿的雅可比矩阵（d_res_d_xi非空时）
   if (d_res_d_xi) {
+    // 临时变量：3D点对位姿的雅可比矩阵（4xPOSE_SIZE，POSE_SIZE=6）
     Eigen::Matrix<Scalar, 4, POSE_SIZE> d_point_d_xi;
+
+    // 前3行前3列：平移部分的导数（单位矩阵 * 逆深度）
     d_point_d_xi.template topLeftCorner<3, 3>() =
         Eigen::Matrix<Scalar, 3, 3>::Identity() * kpt_pos.inv_dist;
+
+    // 前3行后3列：旋转部分的导数（-反对称矩阵 * 3D点前3维）
+    // Sophus::SO3::hat：将3D向量转换为3x3反对称矩阵，用于旋转导数计算
     d_point_d_xi.template topRightCorner<3, 3>() =
         -Sophus::SO3<Scalar>::hat(p_t_3d.template head<3>());
+
+    // 第4行置零：逆深度对位姿无导数
     d_point_d_xi.row(3).setZero();
 
+    // 链式法则：残差对位姿的雅可比 = 投影雅可比 * 点对位姿的雅可比
     *d_res_d_xi = Jp * d_point_d_xi;
   }
 
+  // 步骤5.2：计算残差对3D点的雅可比矩阵（d_res_d_p非空时）
   if (d_res_d_p) {
+    // 临时变量：3D点对特征点参数的雅可比矩阵（4x3）
     Eigen::Matrix<Scalar, 4, 3> Jpp;
     Jpp.setZero();
+
+    // 前3行前2列：方向向量的导数（位姿变换矩阵前3行 * unproject雅可比）
     Jpp.template block<3, 2>(0, 0) = T_t_h.template topLeftCorner<3, 4>() * Jup;
+
+    // 第3列：逆深度的导数（位姿变换矩阵的第3列，平移分量）
     Jpp.col(2) = T_t_h.col(3);
 
+    // 链式法则：残差对3D点的雅可比 = 投影雅可比 * 点对参数的雅可比
     *d_res_d_p = Jp * Jpp;
   }
 
+  // 投影有效，返回true
   return true;
 }
 

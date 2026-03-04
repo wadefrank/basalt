@@ -45,6 +45,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace basalt {
 
 VioConfig::VioConfig() {
+  // =================== 光流相关参数 ===================
+
   // optical_flow_type = "patch";
   optical_flow_type = "frame_to_frame";
   optical_flow_detection_grid_size = 50;
@@ -54,6 +56,8 @@ VioConfig::VioConfig() {
   optical_flow_levels = 3;
   optical_flow_epipolar_error = 0.005;
   optical_flow_skip_frames = 1;
+
+  // ===================== VIO核心参数 =====================
 
   vio_linearization_type = LinearizationType::ABS_QR;
   vio_sqrt_marg = true;
@@ -88,6 +92,8 @@ VioConfig::VioConfig() {
   vio_marg_lost_landmarks = true;
 
   vio_kf_marg_feature_ratio = 0.1;
+
+  // ===================== 地图构建器（Mapper）参数 =====================
 
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
