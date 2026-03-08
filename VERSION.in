@@ -1,0 +1,4 @@
+Project: @PROJECT_NAME@
+Version: @PROJECT_VERSION@
+BuildTime: @BUILD_TIME@
+GitCommit: @GIT_COMMIT_HASH@

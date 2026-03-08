@@ -5,7 +5,27 @@
 cmake_minimum_required(VERSION 3.10...3.18)
 
 # 定义项目名称为 "basalt"
-project(basalt)
+project(basalt VERSION 0.0.1)
+
+# 定义自定义变量（构建时间）
+string(TIMESTAMP BUILD_TIME "%Y-%m-%d %H:%M:%S" UTC)
+
+# 获取Git提交哈希（可选）
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# 创建版本文件
+# - CMAKE_CURRENT_SOURCE_DIR 当前处理的 CMakeLists.txt 文件所在的源码目录
+# - CMAKE_CURRENT_BINARY_DIR 当前处理的 CMakeLists.txt 文件对应的编译输出目录
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.in"  # 输入模板
+  "${CMAKE_CURRENT_BINARY_DIR}/VERSION"     # 输出文件
+  @ONLY                                     # 仅替换@xxx@，如果不加 @ONLY：CMake 会同时替换 @变量名@ 和 ${变量名} 两种格式的占位符；
+)
 
 # 将项目内的cmake_modules目录添加到CMake的模块搜索路径，用于寻找自定义的Find脚本
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules/" ${CMAKE_MODULE_PATH})
