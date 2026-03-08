@@ -43,11 +43,12 @@ enum class LinearizationType { ABS_QR, ABS_SC, REL_SC };
 struct VioConfig {
   /**
    * @brief 构造函数，初始化所有VIO配置参数的默认值
-   * 
+   *
    */
   VioConfig();
   void load(const std::string& filename);
   void save(const std::string& filename);
+  void print() const;
 
   // 光流类型
   // 默认值："frame_to_frame"

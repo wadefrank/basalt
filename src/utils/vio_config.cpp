@@ -37,6 +37,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/utils/vio_config.h>
 
 #include <fstream>
+#include <iostream>  // 新增：用于打印输出
+#include <iomanip>   // 新增：用于格式化输出（如setprecision）
 
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
@@ -134,6 +136,76 @@ void VioConfig::load(const std::string& filename) {
   }
   is.close();
 }
+
+// 新增：完整打印VioConfig所有参数的函数
+void VioConfig::print() const {
+  // 设置输出格式：浮点数保留6位小数，对齐输出
+  std::cout << std::fixed << std::setprecision(6);
+
+  std::cout << "==================================== VioConfig 配置参数 ====================================" << std::endl;
+
+  // =================== 光流相关参数 ===================
+  std::cout << "\n[光流相关参数]" << std::endl;
+  std::cout << "optical_flow_type:                " << optical_flow_type << std::endl;
+  std::cout << "optical_flow_detection_grid_size: " << optical_flow_detection_grid_size << std::endl;
+  std::cout << "optical_flow_max_recovered_dist2: " << optical_flow_max_recovered_dist2 << std::endl;
+  std::cout << "optical_flow_pattern:             " << optical_flow_pattern << std::endl;
+  std::cout << "optical_flow_max_iterations:      " << optical_flow_max_iterations << std::endl;
+  std::cout << "optical_flow_levels:              " << optical_flow_levels << std::endl;
+  std::cout << "optical_flow_epipolar_error:      " << optical_flow_epipolar_error << std::endl;
+  std::cout << "optical_flow_skip_frames:         " << optical_flow_skip_frames << std::endl;
+
+  // ===================== VIO核心参数 =====================
+  std::cout << "\n[VIO核心参数]" << std::endl;
+  std::cout << "vio_linearization_type:           " << magic_enum::enum_name(vio_linearization_type) << std::endl;
+  std::cout << "vio_sqrt_marg:                    " << (vio_sqrt_marg ? "true" : "false") << std::endl;
+  std::cout << "vio_max_states:                   " << vio_max_states << std::endl;
+  std::cout << "vio_max_kfs:                      " << vio_max_kfs << std::endl;
+  std::cout << "vio_min_frames_after_kf:          " << vio_min_frames_after_kf << std::endl;
+  std::cout << "vio_new_kf_keypoints_thresh:      " << vio_new_kf_keypoints_thresh << std::endl;
+  std::cout << "vio_debug:                        " << (vio_debug ? "true" : "false") << std::endl;
+  std::cout << "vio_extended_logging:             " << (vio_extended_logging ? "true" : "false") << std::endl;
+  std::cout << "vio_obs_std_dev:                  " << vio_obs_std_dev << std::endl;
+  std::cout << "vio_obs_huber_thresh:             " << vio_obs_huber_thresh << std::endl;
+  std::cout << "vio_min_triangulation_dist:       " << vio_min_triangulation_dist << std::endl;
+  std::cout << "vio_max_iterations:               " << vio_max_iterations << std::endl;
+  std::cout << "vio_enforce_realtime:             " << (vio_enforce_realtime ? "true" : "false") << std::endl;
+  std::cout << "vio_use_lm:                       " << (vio_use_lm ? "true" : "false") << std::endl;
+  std::cout << "vio_lm_lambda_initial:            " << vio_lm_lambda_initial << std::endl;
+  std::cout << "vio_lm_lambda_min:                " << vio_lm_lambda_min << std::endl;
+  std::cout << "vio_lm_lambda_max:                " << vio_lm_lambda_max << std::endl;
+  std::cout << "vio_scale_jacobian:               " << (vio_scale_jacobian ? "true" : "false") << std::endl;
+  std::cout << "vio_init_pose_weight:             " << vio_init_pose_weight << std::endl;
+  std::cout << "vio_init_ba_weight:               " << vio_init_ba_weight << std::endl;
+  std::cout << "vio_init_bg_weight:               " << vio_init_bg_weight << std::endl;
+  std::cout << "vio_marg_lost_landmarks:          " << (vio_marg_lost_landmarks ? "true" : "false") << std::endl;
+  std::cout << "vio_kf_marg_feature_ratio:        " << vio_kf_marg_feature_ratio << std::endl;
+
+  // ===================== 地图构建器（Mapper）参数 =====================
+  std::cout << "\n[地图构建器（Mapper）参数]" << std::endl;
+  std::cout << "mapper_obs_std_dev:               " << mapper_obs_std_dev << std::endl;
+  std::cout << "mapper_obs_huber_thresh:          " << mapper_obs_huber_thresh << std::endl;
+  std::cout << "mapper_detection_num_points:      " << mapper_detection_num_points << std::endl;
+  std::cout << "mapper_num_frames_to_match:       " << mapper_num_frames_to_match << std::endl;
+  std::cout << "mapper_frames_to_match_threshold: " << mapper_frames_to_match_threshold << std::endl;
+  std::cout << "mapper_min_matches:               " << mapper_min_matches << std::endl;
+  std::cout << "mapper_ransac_threshold:          " << mapper_ransac_threshold << std::endl;
+  std::cout << "mapper_min_track_length:          " << mapper_min_track_length << std::endl;
+  std::cout << "mapper_max_hamming_distance:      " << mapper_max_hamming_distance << std::endl;
+  std::cout << "mapper_second_best_test_ratio:    " << mapper_second_best_test_ratio << std::endl;
+  std::cout << "mapper_bow_num_bits:              " << mapper_bow_num_bits << std::endl;
+  std::cout << "mapper_min_triangulation_dist:    " << mapper_min_triangulation_dist << std::endl;
+  std::cout << "mapper_no_factor_weights:         " << (mapper_no_factor_weights ? "true" : "false") << std::endl;
+  std::cout << "mapper_use_factors:               " << (mapper_use_factors ? "true" : "false") << std::endl;
+  std::cout << "mapper_use_lm:                    " << (mapper_use_lm ? "true" : "false") << std::endl;
+  std::cout << "mapper_lm_lambda_min:             " << mapper_lm_lambda_min << std::endl;
+  std::cout << "mapper_lm_lambda_max:             " << mapper_lm_lambda_max << std::endl;
+
+  std::cout << "============================================================================================" << std::endl;
+  // 恢复默认输出格式
+  std::cout << std::resetiosflags(std::ios::fixed);
+}
+
 }  // namespace basalt
 
 namespace cereal {
