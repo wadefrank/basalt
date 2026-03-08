@@ -8,3 +8,4 @@ stats_*.*json
 __pycache__
 
 install/
+dist/
