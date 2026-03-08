@@ -51,8 +51,13 @@ cd basalt
 ./scripts/install_deps.sh
 mkdir build
 cd build
+# cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=../install
 cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
 make -j8
+
+# run
+./basalt_vio --dataset-path /home/wade/wade/Data/machine_hall/MH_05_difficult/MH_05_difficult --cam-calib /home/wade/wade/Code/SLAM/basalt/data/euroc_ds_calib.json --dataset-type euroc --config-path /home/wade/wade/Code/SLAM/basalt/data/euroc_config.json --marg-data /home/wade/wade/Result/basalt_vio/euroc_marg_data  --show-gui 1
+Loaded camera with 2 cameras
 ```
 
 ## Usage

@@ -14,12 +14,12 @@
 #include <opencv2/opencv.hpp>
 
 // 自定义VIO头文件
-#include "qxwz_vio.h"
+#include "basalt/api/basalt_vio.h"
 
 // 命名空间简化
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-using namespace qxwz;
+using namespace basalt_vio;
 
 // -------------------------- 全局变量/工具函数 --------------------------
 // 位姿保存文件（确保线程安全）
@@ -128,11 +128,11 @@ std::vector<ImuData> loadEuRoCImuData(const std::string& imu_path) {
 int main(int argc, char** argv) {
     // -------------------------- 1. 初始化路径与参数 --------------------------
     // 配置/标定文件路径
-    std::string config_file_path = "/home/qxit-ln-002408/fengxian/Codes/qxwz/basalt/config/euroc_config.json";
-    std::string calib_file_path = "/home/qxit-ln-002408/fengxian/Codes/qxwz/basalt/data/euroc_ds_calib.json";
+    std::string config_file_path = "/home/wade/wade/Code/SLAM/basalt/data/euroc_config.json";
+    std::string calib_file_path = "/home/wade/wade/Code/SLAM/basalt/data/euroc_ds_calib.json";
 
     // EuRoC数据集路径
-    std::string euroc_data_path = "/data/qxcg_datasets/SLAM/euroc_data/MH_05_difficult";
+    std::string euroc_data_path = "/home/wade/wade/Data/machine_hall/MH_05_difficult/MH_05_difficult";
     std::string cam0_ts_path = euroc_data_path + "/mav0/cam0/data.csv";
     std::string cam1_ts_path = euroc_data_path + "/mav0/cam1/data.csv";
     std::string imu_ts_path = euroc_data_path + "/mav0/imu0/data.csv";
@@ -140,29 +140,29 @@ int main(int argc, char** argv) {
     std::string cam1_img_dir = euroc_data_path + "/mav0/cam1/data/";
 
     // 位姿保存路径（确保目录存在）
-    std::string result_dir = "/home/qxit-ln-002408/fengxian/Result/20260306";
+    std::string result_dir = "/home/wade/wade/Result/basalt_vio/trajectory";
     if (!fs::exists(result_dir)) {
         fs::create_directories(result_dir);
     }
     std::string pose_save_path = result_dir + "/vio_pose_tum.txt";
 
     // -------------------------- 2. 初始化VIO对象 --------------------------
-    std::shared_ptr<VIO> qxwz_vio = std::make_shared<VIO>();
+    std::shared_ptr<VIO> basalt_vio = std::make_shared<VIO>();
 
     // -------------------------- 3. 加载配置与标定 --------------------------
     std::cout << "Loading VIO config..." << std::endl;
-    if (!qxwz_vio->loadConfig(config_file_path)) {
+    if (!basalt_vio->loadConfig(config_file_path)) {
         std::cerr << "Failed to load config file!" << std::endl;
         return -1;
     }
-    // qxwz_vio->printConfig();  // 可选：打印配置
+    // basalt_vio->printConfig();  // 可选：打印配置
 
     std::cout << "Loading calibration file..." << std::endl;
-    if (!qxwz_vio->loadCalib(calib_file_path)) {
+    if (!basalt_vio->loadCalib(calib_file_path)) {
         std::cerr << "Failed to load calibration file!" << std::endl;
         return -1;
     }
-    // qxwz_vio->printCalib();  // 可选：打印标定参数
+    // basalt_vio->printCalib();  // 可选：打印标定参数
 
     // -------------------------- 4. 注册回调函数 --------------------------
     // 打开位姿保存文件
@@ -175,12 +175,12 @@ int main(int argc, char** argv) {
     pose_file << "# timestamp x y z qx qy qz qw" << std::endl;
 
     // 注册位姿回调和状态回调
-    qxwz_vio->registerPoseCallback(poseCallback);
-    qxwz_vio->registerStatusCallback(statusCallback);
+    basalt_vio->registerPoseCallback(poseCallback);
+    basalt_vio->registerStatusCallback(statusCallback);
 
     // -------------------------- 5. 启动VIO --------------------------
     std::cout << "Starting VIO..." << std::endl;
-    bool is_vio_start_succ = qxwz_vio->start();
+    bool is_vio_start_succ = basalt_vio->start();
     if (!is_vio_start_succ) {
         std::cerr << "VIO start failed!" << std::endl;
         pose_file.close();
@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
     std::vector<ImuData> imu_data_list = loadEuRoCImuData(imu_ts_path);
     if (imu_data_list.empty()) {
         std::cerr << "No IMU data loaded!" << std::endl;
-        qxwz_vio->shutdown();
+        basalt_vio->shutdown();
         pose_file.close();
         return -1;
     }
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
     std::vector<int64_t> cam1_timestamps = loadEuRoCTimestamps(cam1_ts_path);
     if (cam0_timestamps.empty() || cam1_timestamps.empty() || cam0_timestamps.size() != cam1_timestamps.size()) {
         std::cerr << "Camera timestamps load failed or mismatch!" << std::endl;
-        qxwz_vio->shutdown();
+        basalt_vio->shutdown();
         pose_file.close();
         return -1;
     }
@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
             // prev_ts = imu_data.timestamp;
 
             // 推送IMU数据
-            qxwz_vio->pushIMU(imu_data);
+            basalt_vio->pushIMU(imu_data);
         }
     });
 
@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
         stereo_img_data.rightImage.exposure = 0.0;
 
         // 推送双目图像数据
-        qxwz_vio->pushStereoImage(stereo_img_data);
+        basalt_vio->pushStereoImage(stereo_img_data);
 
         // 模拟20Hz实时推送（50ms）
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -281,11 +281,11 @@ int main(int argc, char** argv) {
 
     // -------------------------- 9. 停止VIO并清理 --------------------------
     std::cout << "Shutting down VIO..." << std::endl;
-    qxwz_vio->shutdown();
+    basalt_vio->shutdown();
 
     // 注销回调
-    qxwz_vio->unregisterPoseCallback();
-    qxwz_vio->unregisterStatusCallback();
+    basalt_vio->unregisterPoseCallback();
+    basalt_vio->unregisterStatusCallback();
 
     // 关闭文件
     pose_file.close();

@@ -1,6 +1,6 @@
-#include "qxwz_vio.h"
+#include "basalt/api/basalt_vio.h"
 
-namespace qxwz {
+namespace basalt_vio {
 
 // 构造函数
 VIO::VIO()
@@ -459,4 +459,4 @@ void VIO::stopPoseThread() {
     }
 }
 
-} // namespace qxwz
+} // namespace basalt_vio

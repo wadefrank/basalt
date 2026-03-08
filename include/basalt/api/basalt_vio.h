@@ -42,7 +42,7 @@
 
 #include <opencv2/highgui/highgui.hpp>
 
-namespace basalt {
+namespace basalt_vio {
 
 // IMU数据
 struct ImuData {
@@ -236,4 +236,4 @@ private:
     std::shared_mutex status_callback_mutex_;                           // 保护回调函数的读写
 };
 
-} // namespace basalt
+} // namespace basalt_vio
