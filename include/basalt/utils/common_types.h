@@ -65,8 +65,8 @@ struct TimeCamId {
   TimeCamId(const FrameId& frame_id, const CamId& cam_id)
       : frame_id(frame_id), cam_id(cam_id) {}
 
-  FrameId frame_id;
-  CamId cam_id;
+  FrameId frame_id;   // 关键帧ID
+  CamId cam_id;       // 相机ID（0表示左目，1表示右目）
 };
 
 inline std::ostream& operator<<(std::ostream& os, const TimeCamId& tcid) {

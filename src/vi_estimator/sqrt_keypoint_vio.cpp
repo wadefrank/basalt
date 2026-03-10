@@ -283,7 +283,8 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
         }
 
-        // 处理时间戳超出当前帧的情况：补全最后一段积分到当前帧时间戳
+        // 处理窗口中最后一帧时间戳小于当前帧的情况：补全最后一段积分到当前帧时间戳
+        //  | . . . . |
         if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
           if (!data.get()) break; // IMU数据为空则退出
           // 临时修改IMU数据的时间戳为当前帧时间戳，补全积分
@@ -403,27 +404,29 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
   // 将当前帧的光流观测结果存入字典（以时间戳为键），供后续三角化/投影使用
   prev_opt_flow_res[opt_flow_meas->t_ns] = opt_flow_meas;
 
-  // -------------------------- 3. 关联已有3D路标点与当前帧观测 --------------------------
+  // -------------------------- 3. 将当前帧观测与已有3D路标点进行关联 --------------------------
   // Make new residual for existing keypoints
-  int connected0 = 0;                             // 相机0中与已有3D点关联的特征点数量
-  std::map<int64_t, int> num_points_connected;    // 各帧关联的特征点数量（用于边缘化）
-  std::unordered_set<int> unconnected_obs0;       // 相机0中未关联3D点的特征点ID
+  int connected0 = 0;                             // 相机0（左目相机）中与已有3D点路标点关联的特征点数量
+  std::map<int64_t, int> num_points_connected;    // 所有相机（左目相机+右目相机）中与各帧关联的特征点数量（用于边缘化）
+  std::unordered_set<int> unconnected_obs0;       // 相机0（左目相机）中未关联3D点的特征点ID
 
-  // 遍历当前帧所有相机的光流观测（i为相机索引）
+  // 遍历左右目相机（i为相机索引，i=0表示左目相机，i=1表示右目相机）
   for (size_t i = 0; i < opt_flow_meas->observations.size(); i++) {
-    // 构建当前观测的时间-相机ID（唯一标识某一相机的某一帧）
+    
+    // 构建当前观测时间-相机ID（唯一标识某一相机的某一帧）
     TimeCamId tcid_target(opt_flow_meas->t_ns, i);
 
-    // 遍历当前相机的所有特征点观测（kv_obs: 特征点ID -> 观测坐标）
+    // 遍历当前相机的所有特征点观测
     for (const auto& kv_obs : opt_flow_meas->observations[i]) {
-      int kpt_id = kv_obs.first;
+      // kv_obs: map{特征点ID, 观测坐标}
+      int kpt_id = kv_obs.first;  // 获取特征点id
 
       // 如果该特征点已存在对应的3D路标点（lmdb是路标点数据库）
       if (lmdb.landmarkExists(kpt_id)) {
         // 获取该路标点的主关键帧ID（生成该3D点的关键帧）
         const TimeCamId& tcid_host = lmdb.getLandmark(kpt_id).host_kf_id;
 
-        // 构建特征点观测结构体（存储ID和归一化坐标）
+        // 构建特征点观测结构体（存储特征点ID和归一化坐标）
         KeypointObservation<Scalar> kobs;
         kobs.kpt_id = kpt_id;
 
@@ -434,16 +437,16 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
         lmdb.addObservation(tcid_target, kobs);
         // obs[tcid_host][tcid_target].push_back(kobs);
 
-        // 统计各主关键帧关联的特征点数量
+        // 统计与各关键帧关联的特征点数量
         if (num_points_connected.count(tcid_host.frame_id) == 0) {
           num_points_connected[tcid_host.frame_id] = 0;
         }
         num_points_connected[tcid_host.frame_id]++;
 
-        // 如果是相机0，统计关联的特征点数量
+        // 如果是相机0（左目相机），统计关联的特征点数量
         if (i == 0) connected0++;
       } else {
-        // 如果是相机0且无对应3D点，加入未关联集合（后续用于三角化）
+        // 如果是相机0（左目相机）且无对应3D点，加入未关联集合（后续用于三角化）
         if (i == 0) {
           unconnected_obs0.emplace(kpt_id);
         }
@@ -452,7 +455,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
   }
 
   // -------------------------- 4. 关键帧判定 --------------------------
-  // 关键帧判断条件（满足其一则选为关键帧）：
+  // 关键帧判断条件（满足下面两个条件则选为关键帧）：
   //     1. 跟踪到的3d点 / (跟踪到的3d点+未跟踪到的3d点) < 阈值 【1. 相机0中已关联3D点的特征点占比 < 阈值（跟踪质量下降）】
   //     2. 离上一帧关键帧的帧数 > 阈值                       【2. 距离上一关键帧的帧数 > 最小间隔帧数（保证关键帧分布）】
   if (Scalar(connected0) / (connected0 + unconnected_obs0.size()) <
@@ -474,12 +477,12 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
     frames_after_kf = 0;              // 重置关键帧后帧数计数
     kf_ids.emplace(last_state_t_ns);  // 记录关键帧时间戳
 
-    // 构建当前关键帧的时间-相机ID（相机0为主相机）
+    // 当前帧：关键帧ID-相机ID（相机0为主相机）
     TimeCamId tcidl(opt_flow_meas->t_ns, 0);
 
     int num_points_added = 0;         // 本次关键帧三角化成功的3D点数量
 
-    // 遍历相机0中所有未关联3D点的特征点（需要三角化的特征点）
+    // 遍历相机0中所有未关联3D点的特征点（需要三角化的特征点），lm_id为特征点ID
     for (int lm_id : unconnected_obs0) {
       // Find all observations
       // 收集该特征点在所有历史帧中的观测（用于三角化）
@@ -487,12 +490,15 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
 
       // 遍历所有保存的光流结果（历史帧）
       for (const auto& kv : prev_opt_flow_res) {
-        // 遍历历史帧的所有相机
+        // 遍历所有相机（左目和右目）的观测
         for (size_t k = 0; k < kv.second->observations.size(); k++) {
+          
           // 查找该特征点在历史帧当前相机中的观测
           auto it = kv.second->observations[k].find(lm_id);
+
           if (it != kv.second->observations[k].end()) {
-            // 构建历史帧的时间-相机ID
+            
+            // 历史帧：关键帧ID-相机ID
             TimeCamId tcido(kv.first, k);
 
             // 构建特征点观测结构体
@@ -519,9 +525,12 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
       // 遍历该特征点的所有历史观测，寻找满足基线要求的观测对
       for (const auto& kv_obs : kp_obs) {
         if (valid_kp) break;              // 三角化成功则跳过
-        TimeCamId tcido = kv_obs.first;   // 历史观测的时间-相机ID
+        TimeCamId tcido = kv_obs.first;   // 历史观测：关键帧ID-相机ID
 
-        // 获取当前关键帧（相机0）和历史帧（对应相机）的特征点归一化坐标
+        // 获取未找到关联3D路标点的特征点在
+        //  - 当前关键帧（相机0）
+        //  - 历史帧（对应相机）
+        // 的归一化坐标
         const Vec2 p0 = opt_flow_meas->observations.at(0)
                             .at(lm_id)
                             .translation()

@@ -58,10 +58,15 @@ struct OpticalFlowInput {
   std::vector<ImageData> img_data;
 };
 
+// 视觉前端输出的光流结果
 struct OpticalFlowResult {
   using Ptr = std::shared_ptr<OpticalFlowResult>;
 
   int64_t t_ns;
+
+  // observations.size(): 表示相机的个数（默认是2，即双目相机）
+  // KeypointId：表示特征点id
+  // Eigen::AffineCompact2f：存放的特征点的像素位置
   std::vector<Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>>
       observations;
 

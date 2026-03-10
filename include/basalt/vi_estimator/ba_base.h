@@ -157,7 +157,7 @@ class BundleAdjustmentBase {
   Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>> frame_poses;
 
   // Point management
-  LandmarkDatabase<Scalar> lmdb;
+  LandmarkDatabase<Scalar> lmdb;  // 路标点数据集，管理3D路标点
 
   Scalar obs_std_dev;
   Scalar huber_thresh;

@@ -43,8 +43,8 @@ template <class Scalar_>
 struct KeypointObservation {
   using Scalar = Scalar_;
 
-  int kpt_id;
-  Eigen::Matrix<Scalar, 2, 1> pos;
+  int kpt_id;                         // 特征点ID
+  Eigen::Matrix<Scalar, 2, 1> pos;    // 特征点归一化坐标
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
@@ -63,7 +63,7 @@ struct Keypoint {
   Scalar inv_dist;
 
   // Observations
-  TimeCamId host_kf_id;
+  TimeCamId host_kf_id;   // 关键帧ID和相机ID
   ObsMap obs;
 
   inline void backup() {
@@ -97,12 +97,14 @@ class LandmarkDatabase {
                        const std::set<FrameId>& poses_to_marg,
                        const std::set<FrameId>& states_to_marg_all);
 
+  // 将该观测关联添加到路标点数据库
   void addObservation(const TimeCamId& tcid_target,
                       const KeypointObservation<Scalar>& o);
 
   Keypoint<Scalar>& getLandmark(KeypointId lm_id);
 
   // Const
+  // 获取
   const Keypoint<Scalar>& getLandmark(KeypointId lm_id) const;
 
   std::vector<TimeCamId> getHostKfs() const;
@@ -147,6 +149,7 @@ class LandmarkDatabase {
 
   Eigen::aligned_unordered_map<KeypointId, Keypoint<Scalar>> kpts;
 
+  // 观测索引表：用于快速查询"哪些路标点在哪些帧中被观测到"
   std::unordered_map<TimeCamId, std::map<TimeCamId, std::set<KeypointId>>>
       observations;
 
