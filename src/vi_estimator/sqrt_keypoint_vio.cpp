@@ -721,6 +721,13 @@ Eigen::VectorXd SqrtKeypointVioEstimator<Scalar_>::checkMargEigenvalues()
   return checkEigenvalues(nullspace_marg_data, false);
 }
 
+/**
+ * @brief 
+ * 
+ * @tparam Scalar_                  数值类型模板参数（如float/double），用于控制精度
+ * @param num_points_connected      
+ * @param lost_landmaks             丢失路标点数量
+ */
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::marginalize(
     const std::map<int64_t, int>& num_points_connected,
@@ -1181,39 +1188,57 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
   stats_sums_.add("marginalize", t_total.elapsed()).format("ms");
 }
 
+/**
+ * @brief 基于列文伯格-马夸尔特（LM）算法的视觉惯性里程计（VIO）优化器核心实现
+ * 
+ * @tparam Scalar_ 数值类型模板参数（如float/double），用于控制精度
+ */
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::optimize() {
+  // 调试模式：打印分隔符，用于区分不同优化轮次的日志
   if (config.vio_debug) {
     std::cout << "=================================" << std::endl;
   }
 
+  // 优化启动条件（满足以下其一即可）：
+  // 1. 已启动过优化（opt_started标记）
+  // 2. 帧状态数量超过4（避免过早优化）
   if (opt_started || frame_states.size() > 4) {
-    opt_started = true;
+    opt_started = true; // 标记优化已启动
+
+    // -------------------------- 配置与计时初始化 --------------------------
 
     // harcoded configs
+    // 硬编码配置（已注释，保留历史逻辑）：雅可比矩阵缩放开关（仅QR求解器生效）
     // bool scale_Jp = config.vio_scale_jacobian && is_qr_solver();
     // bool scale_Jl = config.vio_scale_jacobian && is_qr_solver();
 
     // timing
+    // 性能统计：记录各阶段耗时
     ExecutionStats stats;
-    Timer timer_total;
-    Timer timer_iteration;
+    Timer timer_total;        // 总耗时计时器
+    Timer timer_iteration;    // 单次迭代耗时计时器
 
-    // construct order of states in linear system --> sort by ascending
-    // timestamp
+    // construct order of states in linear system --> sort by ascending timestamp
+    // -------------------------- 线性系统状态排序 --------------------------
+    // 构建线性系统中状态的顺序映射：按时间戳升序排列（保证边缘化/优化顺序一致）
     AbsOrderMap aom;
 
+    // 1. 先添加帧位姿（frame_poses）到状态顺序映射
     for (const auto& kv : frame_poses) {
+      // 记录该帧ID对应的状态起始索引和状态维度（POSE_SIZE = 6）
       aom.abs_order_map[kv.first] = std::make_pair(aom.total_size, POSE_SIZE);
 
       // Check that we have the same order as marginalization
+      // 断言：当前状态顺序必须与边缘化数据中的顺序一致（避免边缘化/优化状态错位）
       BASALT_ASSERT(marg_data.order.abs_order_map.at(kv.first) ==
                     aom.abs_order_map.at(kv.first));
 
-      aom.total_size += POSE_SIZE;
-      aom.items++;
+      aom.total_size += POSE_SIZE;  // 更新总状态维度
+      aom.items++;                  // 更新状态项数量
     }
 
+    // 2. 再添加帧完整状态（frame_states：位姿+速度+IMU偏置）到状态顺序映射
     for (const auto& kv : frame_states) {
       aom.abs_order_map[kv.first] =
           std::make_pair(aom.total_size, POSE_VEL_BIAS_SIZE);
@@ -1227,84 +1252,113 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
       aom.items++;
     }
 
-    // TODO: Check why we get better accuracy with old SC loop. Possible
-    // culprits:
-    // - different initial lambda (based on previous iteration)
-    // - no landmark damping
-    // - outlier removal after 4 iterations?
+    // -------------------------- 优化参数初始化 --------------------------
+
+    // TODO: Check why we get better accuracy with old SC loop. Possible culprits: 待办：排查为何旧版SC循环精度更好，可能原因：
+    // - different initial lambda (based on previous iteration)，初始lambda（LM阻尼系数）不同（基于上一轮迭代）
+    // - no landmark damping，无特征点阻尼
+    // - outlier removal after 4 iterations?，4次迭代后才做外点剔除？
+    
+    // 初始化LM阻尼系数
     lambda = Scalar(config.vio_lm_lambda_initial);
 
     // record stats
+    // 记录统计信息：相机数量、特征点数量、观测数量（用于调试/性能分析）
     stats.add("num_cams", this->frame_poses.size()).format("count");
     stats.add("num_lms", this->lmdb.numLandmarks()).format("count");
     stats.add("num_obs", this->lmdb.numObservations()).format("count");
 
+    // -------------------------- 线性化器初始化 --------------------------
     // setup landmark blocks
+    // 线性化器配置：设置鲁棒核、观测噪声、线性化类型
     typename LinearizationBase<Scalar, POSE_SIZE>::Options lqr_options;
-    lqr_options.lb_options.huber_parameter = huber_thresh;
-    lqr_options.lb_options.obs_std_dev = obs_std_dev;
-    lqr_options.linearization_type = config.vio_linearization_type;
+    lqr_options.lb_options.huber_parameter = huber_thresh;                // Huber鲁棒核阈值（抑制外点影响）
+    lqr_options.lb_options.obs_std_dev = obs_std_dev;                     // 观测噪声标准差
+    lqr_options.linearization_type = config.vio_linearization_type;       // 线性化类型（ABS_QR）
 
-    std::unique_ptr<LinearizationBase<Scalar, POSE_SIZE>> lqr;
+    // 线性化器智能指针：封装残差线性化、雅可比构建、QR边缘化逻辑
+    std::unique_ptr<LinearizationBase<Scalar, POSE_SIZE>> lqr;            //  基于 QR 分解的线性化（求解器）Linearization with QR
 
+    // IMU线性化数据初始化：包含重力向量、IMU偏置权重、IMU测量数据
     ImuLinData<Scalar> ild = {
         g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight, {}};
+
+    // 填充IMU测量数据：映射帧ID到对应的IMU测量值
     for (const auto& kv : imu_meas) {
       ild.imu_meas[kv.first] = &kv.second;
     }
 
+    // 创建线性化器实例（耗时统计）
     {
       Timer t;
-      lqr = LinearizationBase<Scalar, POSE_SIZE>::create(this, aom, lqr_options,
-                                                         &marg_data, &ild);
+      // 初始化线性化器：传入当前估计器、状态顺序、配置、边缘化数据、IMU数据
+      lqr = LinearizationBase<Scalar, POSE_SIZE>::create(this, aom, lqr_options, &marg_data, &ild);
+
+      // 记录线性化器创建耗时
       stats.add("allocateLMB", t.reset()).format("ms");
+
+      // 记录问题规模统计（如残差数量、状态维度）
       lqr->log_problem_stats(stats);
     }
 
-    bool terminated = false;
-    bool converged = false;
-    std::string message;
+    // -------------------------- LM优化主循环 --------------------------
+    bool terminated = false;  // 优化终止标记
+    bool converged = false;   // 优化收敛标记
+    std::string message;      // 终止原因描述
 
-    int it = 0;
-    int it_rejected = 0;
+    int it = 0;               // 当前迭代次数
+    int it_rejected = 0;      // 被拒绝的迭代次数（步长无效/成本上升）
+
+    // LM迭代循环：最多执行config.vio_max_iterations次（默认值为7），未终止则继续
     for (; it <= config.vio_max_iterations && !terminated;) {
+      // 非首次迭代：重置单次迭代计时器（首次迭代无需计时，仅线性化）
       if (it > 0) {
         timer_iteration.reset();
       }
 
-      Scalar error_total = 0;
-      VecX Jp_column_norm2;
+      Scalar error_total = 0;   // 当前迭代的总残差平方和
+      VecX Jp_column_norm2;     // 位姿雅可比矩阵列范数平方（用于雅可比缩放，已注释）
 
+      // -------------------------- 残差线性化与边缘化 --------------------------
       {
         // TODO: execution could be done staged
 
         Timer t;
 
         // linearize residuals
-        bool numerically_valid;
+        // 1. 线性化所有残差（视觉+IMU+边缘化先验）
+        bool numerically_valid; // 数值有效性标记（避免NaN/Inf）
         error_total = lqr->linearizeProblem(&numerically_valid);
+
+        // 断言：线性化过程中数值必须有效（否则优化崩溃）
         BASALT_ASSERT_STREAM(
             numerically_valid,
             "did not expect numerical failure during linearization");
+
+        // 记录线性化耗时
         stats.add("linearizeProblem", t.reset()).format("ms");
 
         //        // compute pose jacobian norm squared for Jacobian scaling
+        //        // 2. 计算位姿雅可比列范数平方（用于雅可比缩放，已注释）
         //        if (scale_Jp) {
         //          Jp_column_norm2 = lqr->getJp_diag2();
         //          stats.add("getJp_diag2", t.reset()).format("ms");
         //        }
 
         //        // scale landmark jacobians
+        //        // 3. 缩放特征点雅可比（已注释）
         //        if (scale_Jl) {
         //          lqr->scaleJl_cols();
         //          stats.add("scaleJl_cols", t.reset()).format("ms");
         //        }
 
         // marginalize points in place
+        // 4. 执行QR分解边缘化特征点：将特征点状态从线性系统中消去（稀疏性优化）
         lqr->performQR();
         stats.add("performQR", t.reset()).format("ms");
       }
 
+      // 调试模式：打印当前迭代的残差和迭代次数
       if (config.vio_debug) {
         // TODO: num_points debug output missing
         std::cout << "[LINEARIZE] Error: " << error_total << " num points "
@@ -1313,6 +1367,7 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
       }
 
       // compute pose jacobian scaling
+      // 计算位姿雅可比缩放系数（已注释）
       //      VecX jacobian_scaling;
       //      if (scale_Jp) {
       //        // TODO: what about jacobian scaling for SC solver?
@@ -1327,9 +1382,11 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
       //   std::cout << "\t[INFO] Stage 1" << std::endl;
       //}
 
-      // inner loop for backtracking in LM (still count as main iteration
-      // though)
+      // inner loop for backtracking in LM (still count as main iteration though)
+      // -------------------------- LM回溯内循环 --------------------------
+      // LM回溯：调整阻尼系数lambda，直到找到有效的下降步长
       for (int j = 0; it <= config.vio_max_iterations && !terminated; j++) {
+        // 非首次回溯：重置迭代计时器，打印调试日志
         if (j > 0) {
           timer_iteration.reset();
           if (config.vio_debug) {
@@ -1341,7 +1398,7 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
           // Timer t;
 
           // TODO: execution could be done staged
-
+          //       设置阻尼系数（已注释，保留历史逻辑）
           //          // set (updated) damping for poses
           //          if (config.vio_lm_pose_damping_variant == 0) {
           //            lqr->setPoseDamping(lambda);
@@ -1365,11 +1422,14 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
         //   std::cout << "\t[INFO] Stage 2 " << std::endl;
         // }
 
-        VecX inc;
+        // -------------------------- 求解线性系统 --------------------------
+        VecX inc; // 状态增量（待求解）
+
         {
           Timer t;
 
           // get dense reduced camera system
+          // 1. 获取稠密的归约后相机系统（Hessian矩阵H + 残差向量b）
           MatX H;
           VecX b;
 
@@ -1377,41 +1437,53 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
           stats.add("get_dense_H_b", t.reset()).format("ms");
 
+          // 2. 带阻尼求解线性系统 H*inc = b（LM核心：H += lambda*I）
           int iter = 0;
           bool inc_valid = false;
-          constexpr int max_num_iter = 3;
-
+          constexpr int max_num_iter = 3; // 最大重试次数（避免阻尼过小导致数值不稳定）
+          
+          // 重试求解：直到增量有效或达到最大重试次数
           while (iter < max_num_iter && !inc_valid) {
+            // 计算阻尼项：lambda * H对角线，且不小于最小阻尼min_lambda
             VecX Hdiag_lambda = (H.diagonal() * lambda).cwiseMax(min_lambda);
             MatX H_copy = H;
-            H_copy.diagonal() += Hdiag_lambda;
+            H_copy.diagonal() += Hdiag_lambda;  // 添加阻尼到Hessian矩阵
 
+            // LDLT分解求解线性系统（对称正定矩阵高效求解）
             Eigen::LDLT<Eigen::Ref<MatX>> ldlt(H_copy);
             inc = ldlt.solve(b);
             stats.add("solve", t.reset()).format("ms");
 
+            // 检查增量是否有效（无NaN/Inf）
             if (!inc.array().isFinite().all()) {
+              // 增量无效：增大阻尼系数（lambda_vee为阻尼放大系数）
               lambda = lambda_vee * lambda;
               lambda_vee *= vee_factor;
             } else {
-              inc_valid = true;
+              inc_valid = true; // 增量有效，退出重试
             }
             iter++;
           }
 
+          // 重试多次仍无效：打印错误日志
           if (!inc_valid) {
             std::cerr << "Still invalid inc after " << max_num_iter
                       << " iterations." << std::endl;
           }
         }
 
+        // -------------------------- 状态更新与验证 --------------------------
         // backup state (then apply increment and check cost decrease)
+        // 备份当前状态（若步长无效，需恢复）
         backup();
 
         // backsubstitute (with scaled pose increment)
+        // 线性化模型预测的成本下降量
         Scalar l_diff = 0;
+
         {
           // negate pose increment before point update
+          // 回代特征点增量：利用归约后的相机系统增量，计算特征点的增量
           inc = -inc;
 
           Timer t;
@@ -1420,33 +1492,45 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
         }
 
         // undo jacobian scaling before applying increment to poses
+        // 雅可比缩放逆操作（已注释）
         //        if (scale_Jp) {
         //          inc.array() *= jacobian_scaling.array();
         //        }
 
         // apply increment to poses
+        // 应用位姿增量到frame_poses
         for (auto& [frame_id, state] : frame_poses) {
-          int idx = aom.abs_order_map.at(frame_id).first;
-          state.applyInc(inc.template segment<POSE_SIZE>(idx));
+          int idx = aom.abs_order_map.at(frame_id).first;                   // 获取该帧状态起始索引
+          state.applyInc(inc.template segment<POSE_SIZE>(idx));             // 应用POSE_SIZE维度的增量
         }
 
+        // 应用完整状态增量到frame_states（位姿+速度+IMU偏置）
         for (auto& [frame_id, state] : frame_states) {
-          int idx = aom.abs_order_map.at(frame_id).first;
-          state.applyInc(inc.template segment<POSE_VEL_BIAS_SIZE>(idx));
+          int idx = aom.abs_order_map.at(frame_id).first;                   // 获取该帧状态起始索引
+          state.applyInc(inc.template segment<POSE_VEL_BIAS_SIZE>(idx));    // 应用完整维度增量
         }
 
         // compute stepsize
+        // 计算步长的无穷范数（最大绝对值，用于判断收敛）
         Scalar step_norminf = inc.array().abs().maxCoeff();
 
+
+        // -------------------------- 代价函数评估 --------------------------
         // compute error update applying increment
+        // 更新后的残差：视觉+IMU残差 + 边缘化先验残差
         Scalar after_update_marg_prior_error = 0;
         Scalar after_update_vision_and_inertial_error = 0;
 
         {
           Timer t;
+
+          // 1. 计算视觉+IMU残差（基础部分）
           computeError(after_update_vision_and_inertial_error);
+
+          // 2. 计算边缘化先验残差
           computeMargPriorError(marg_data, after_update_marg_prior_error);
 
+          // 3. 单独计算IMU残差（分解为IMU主体残差+偏置残差+BA残差）
           Scalar after_update_imu_error = 0, after_bg_error = 0,
                  after_ba_error = 0;
           ScBundleAdjustmentBase<Scalar>::computeImuError(
@@ -1454,26 +1538,34 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
               frame_states, imu_meas, gyro_bias_sqrt_weight.array().square(),
               accel_bias_sqrt_weight.array().square(), g);
 
+          // 合并所有IMU相关残差到视觉+IMU总残差
           after_update_vision_and_inertial_error +=
               after_update_imu_error + after_bg_error + after_ba_error;
 
+          // 记录残差计算耗时
           stats.add("computerError2", t.reset()).format("ms");
         }
 
+        // 更新后的总残差
         Scalar after_error_total = after_update_vision_and_inertial_error +
                                    after_update_marg_prior_error;
 
+        // -------------------------- LM步长有效性判断 --------------------------
+
         // check cost decrease compared to quadratic model cost
-        Scalar f_diff;
-        bool step_is_valid = false;
-        bool step_is_successful = false;
-        Scalar relative_decrease = 0;
+        Scalar f_diff;                      // 实际代价下降量（error_total - after_error_total）
+        bool step_is_valid = false;         // 步长是否有效（线性化模型代价下降>0）
+        bool step_is_successful = false;    // 步长是否成功（实际代价下降>0）
+        Scalar relative_decrease = 0;       // 实际下降量 / 模型预测下降量（LM质量指标）
         {
           // compute actual cost decrease
+          // 计算实际代价下降量
           f_diff = error_total - after_error_total;
 
+          // 计算相对下降量（评估线性化模型的准确性）
           relative_decrease = f_diff / l_diff;
 
+          // 调试模式：打印残差、下降量、步长质量、步长大小
           if (config.vio_debug) {
             std::cout << "\t[EVAL] error: {:.4e}, f_diff {:.4e} l_diff {:.4e} "
                          "step_quality {:.2e} step_size {:.2e}\n"_format(
@@ -1490,10 +1582,15 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
           // not occur since our linear systems are not that big (compared to
           // large scale BA for example) and we also abort optimization quite
           // early and usually don't have large damping (== tiny step size).
+          
+          // 步长有效：模型预测的代价下降量>0（避免数值误差导致的非正）
           step_is_valid = l_diff > 0;
+
+          // 步长成功：有效且实际代价下降>0
           step_is_successful = step_is_valid && relative_decrease > 0;
         }
 
+        // 记录迭代耗时和内存使用
         double iteration_time = timer_iteration.elapsed();
         double cumulative_time = timer_total.elapsed();
 
@@ -1506,9 +1603,11 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
           }
         }
 
+        // -------------------------- 步长接受/拒绝逻辑 --------------------------
         if (step_is_successful) {
-          BASALT_ASSERT(step_is_valid);
+          BASALT_ASSERT(step_is_valid); // 断言：成功步长必须有效
 
+          // 调试模式：打印接受信息（残差、阻尼、耗时）
           if (config.vio_debug) {
             //          std::cout << "\t[ACCEPTED] lambda:" << lambda
             //                    << " Error: " << after_error_total <<
@@ -1520,27 +1619,34 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                                    cumulative_time);
           }
 
+          // 减小阻尼系数（LM策略：步长成功，降低阻尼以加快收敛）
           lambda *= std::max<Scalar>(
               Scalar(1.0) / 3,
               1 - std::pow<Scalar>(2 * relative_decrease - 1, 3));
-          lambda = std::max(min_lambda, lambda);
+          lambda = std::max(min_lambda, lambda);  // 阻尼不小于最小值
 
-          lambda_vee = initial_vee;
+          lambda_vee = initial_vee; // 重置阻尼放大系数
 
-          it++;
+          it++; // 迭代次数+1
 
           // check function and parameter tolerance
+          // 收敛判断：
+          //   1.代价下降量<1e-6（残差变化极小）
+          //   2.步长无穷范数<1e-4（状态变化极小）
           if ((f_diff > 0 && f_diff < Scalar(1e-6)) ||
               step_norminf < Scalar(1e-4)) {
-            converged = true;
-            terminated = true;
+            converged = true;     // 标记收敛
+            terminated = true;    // 终止优化
           }
 
           // stop inner lm loop
+          // 退出回溯内循环，进入下一次主迭代
           break;
         } else {
+          // 步长拒绝：标记原因（无效/成本上升）
           std::string reason = step_is_valid ? "REJECTED" : "INVALID";
 
+          // 调试模式：打印拒绝信息
           if (config.vio_debug) {
             //          std::cout << "\t[REJECTED] lambda:" << lambda
             //                    << " Error: " << after_error_total <<
@@ -1552,16 +1658,19 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                                    iteration_time, cumulative_time);
           }
 
+          // 增大阻尼系数（LM策略：步长失败，增大阻尼以保证数值稳定）
           lambda = lambda_vee * lambda;
           lambda_vee *= vee_factor;
 
           //        lambda = std::max(min_lambda, lambda);
           //        lambda = std::min(max_lambda, lambda);
 
+          // 恢复备份的状态（步长无效，回滚）
           restore();
-          it++;
-          it_rejected++;
+          it++;           // 迭代次数+1
+          it_rejected++;  // 拒绝迭代次数+1
 
+          // 阻尼超过最大值：终止优化（数值发散）
           if (lambda > max_lambda) {
             terminated = true;
             message =
@@ -1571,15 +1680,20 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
       }
     }
 
+    // -------------------------- 优化结束：统计与日志 --------------------------
+    // 记录总耗时、迭代次数、拒绝次数
     stats.add("optimize", timer_total.elapsed()).format("ms");
     stats.add("num_it", it).format("count");
     stats.add("num_it_rejected", it_rejected).format("count");
 
     // TODO: call filterOutliers at least once (also for CG version)
+    // 待办：至少调用一次外点剔除（CG求解器也需要）
 
+    // 合并统计数据到全局统计
     stats_all_.merge_all(stats);
     stats_sums_.merge_sums(stats);
 
+    // 调试模式：打印收敛状态和统计信息
     if (config.vio_debug) {
       if (!converged) {
         if (terminated) {
@@ -1592,6 +1706,7 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
         }
       }
 
+      // 打印本次优化统计
       stats.print();
 
       std::cout << "=================================" << std::endl;

@@ -214,6 +214,7 @@ class BundleAdjustmentBase {
     return PoseStateWithLin<Scalar>(it2->second);
   }
 
+  // IMU预积分状态（位姿 + 速度 + IMU 偏置）
   Eigen::aligned_map<int64_t, PoseVelBiasStateWithLin<Scalar>> frame_states;
   Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>> frame_poses;
 

@@ -533,59 +533,112 @@ void LinearizationAbsQR<Scalar, POSE_SIZE>::get_dense_Q2Jp_Q2r(
   get_dense_Q2Jp_Q2r_marg_prior(Q2Jp, Q2r, marg_start_idx);
 }
 
+/**
+ * @brief 构建稠密的Hessian矩阵H和残差向量b（用于LM算法求解线性系统 H*dx = b），针对 VIO 优化中最耗时的 “构建稠密 H/b” 步骤做了并行优化
+ * 
+ *  模块合并顺序：
+ *   - 先并行累加视觉残差的 H/b（占比最大）
+ *   - 再加入IMU 残差的 H/b（运动约束）
+ *   - 接着加入LM 阻尼项（数值稳定）
+ *   - 最后加入边缘化先验的 H/b（窗口约束）
+ * 
+ * @tparam Scalar     数值类型（float/double）
+ * @tparam POSE_SIZE  位姿状态维度（默认值: 6）
+ * @param H           Hessian矩阵
+ * @param b           残差向量b
+ */
 template <typename Scalar, int POSE_SIZE>
 void LinearizationAbsQR<Scalar, POSE_SIZE>::get_dense_H_b(MatX& H,
                                                           VecX& b) const {
+  
+  // -------------------------- 并行归约器定义 --------------------------
+  // 嵌套结构体Reductor：用于TBB并行计算，合并所有特征点块的H和b
+  // 核心作用：将多个特征点块的H/b累加为全局稠密H/b，支持多线程并行
   struct Reductor {
+    /**
+     * @brief 构造函数：初始化归约器
+     *        
+     * @param opt_size            优化变量总维度（所有相机/IMU状态的维度和）
+     * @param landmark_blocks     所有特征点块的指针列表（每个块对应一个特征点的残差/雅可比）
+     */
     Reductor(size_t opt_size,
              const std::vector<LandmarkBlockPtr>& landmark_blocks)
         : opt_size_(opt_size), landmark_blocks_(landmark_blocks) {
-      H_.setZero(opt_size_, opt_size_);
-      b_.setZero(opt_size_);
+      H_.setZero(opt_size_, opt_size_);     // 初始化H为零矩阵（opt_size x opt_size）
+      b_.setZero(opt_size_);                // 初始化b为零向量（opt_size x 1）
     }
 
+    /**
+     * @brief 重载()运算符：单线程处理一个特征点块范围，累加H/b
+     * 
+     * @param range TBB分配的并行处理范围（[begin, end)）
+     */
     void operator()(const tbb::blocked_range<size_t>& range) {
       for (size_t r = range.begin(); r != range.end(); ++r) {
-        auto& lb = landmark_blocks_[r];
-        lb->add_dense_H_b(H_, b_);
+        auto& lb = landmark_blocks_[r];   // 获取第r个特征点块
+
+        // 累加该特征点块的H/b到当前线程的局部H_/b_（视觉残差对应的H/b）
+        lb->add_dense_H_b(H_, b_);        
       }
     }
 
+    /**
+     * @brief 分裂构造函数：TBB并行归约时，分裂当前归约器为两个（用于多线程）
+     * 
+     * @param a 原归约器，tbb::split: TBB分裂标记（无实际值）
+     */
     Reductor(Reductor& a, tbb::split)
         : opt_size_(a.opt_size_), landmark_blocks_(a.landmark_blocks_) {
-      H_.setZero(opt_size_, opt_size_);
-      b_.setZero(opt_size_);
+      H_.setZero(opt_size_, opt_size_);   // 新线程初始化局部H为零
+      b_.setZero(opt_size_);              // 新线程初始化局部b为零
     };
 
+    // 合并函数：将另一个归约器的H/b合并到当前归约器（TBB并行归约的最后一步）
     inline void join(Reductor& b) {
-      H_ += b.H_;
-      b_ += b.b_;
+      H_ += b.H_;   // 累加其他线程的H矩阵
+      b_ += b.b_;   // 累加其他线程的b向量
     }
 
-    size_t opt_size_;
-    const std::vector<LandmarkBlockPtr>& landmark_blocks_;
+    // 成员变量
+    size_t opt_size_;                                       // 优化变量总维度
+    const std::vector<LandmarkBlockPtr>& landmark_blocks_;  // 特征点块列表（只读）
 
-    MatX H_;
-    VecX b_;
+    MatX H_;                                                // 当前线程的局部Hessian矩阵（稠密）
+    VecX b_;                                                // 当前线程的局部残差向量（稠密）
   };
 
+  // -------------------------- 并行构建视觉残差的H/b --------------------------
+
+  // 1. 获取优化变量总维度（所有相机/IMU状态的维度和，由AbsOrderMap统计）
   size_t opt_size = aom.total_size;
 
+  // 2. 初始化归约器：传入优化变量维度和特征点块列表
   Reductor r(opt_size, landmark_blocks);
 
   // go over all host frames
+  // 3. 定义TBB并行范围：遍历所有特征点块索引（0 ~ landmark_block_idx.size()-1）
   tbb::blocked_range<size_t> range(0, landmark_block_idx.size());
+
+  // 4. TBB并行归约：多线程累加所有特征点块的H/b到归约器r中
+  // 核心：每个线程处理一部分特征点块，最后自动调用join合并所有线程的H/b
   tbb::parallel_reduce(range, r);
 
+  // -------------------------- 合并其他模块的H/b --------------------------
+
   // Add imu
+  // 1. 加入IMU残差对应的H/b（IMU预积分残差的Hessian和残差向量）
   add_dense_H_b_imu(r.H_, r.b_);
 
   // Add damping
+  // 2. 加入位姿阻尼项（LM算法的核心：H += lambda*I，增强数值稳定性）
   add_dense_H_b_pose_damping(r.H_);
 
   // Add marginalization
+  // 3. 加入边缘化先验残差对应的H/b（旧帧边缘化后得到的先验约束）
   add_dense_H_b_marg_prior(r.H_, r.b_);
 
+  // -------------------------- 输出结果 --------------------------
+  // 将归约器中的H/b移动到输出参数（std::move避免拷贝，提升效率）
   H = std::move(r.H_);
   b = std::move(r.b_);
 }
