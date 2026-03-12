@@ -99,11 +99,15 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
 
   ~FrameToFrameOpticalFlow() { processing_thread->join(); }
 
+  /**
+   * @brief 光流追踪主线程
+   * 
+   */
   void processingLoop() {
     OpticalFlowInput::Ptr input_ptr;
 
     while (true) {
-      // 从输入队列中获取图像
+      // 从输入队列中获取图像，如果队列为空，则阻塞
       input_queue.pop(input_ptr);
 
       // 如果图像为空，则在输出队列中添加一个空的元素
@@ -117,6 +121,12 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     }
   }
 
+  /**
+   * @brief 单帧光流处理（双目）
+   * 
+   * @param curr_t_ns     时间戳（纳秒）
+   * @param new_img_vec   图像指针（双目）
+   */
   void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_vec) {
     
     // 如果图像的数据为空直接返回
@@ -141,9 +151,11 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
       tbb::parallel_for(tbb::blocked_range<size_t>(0, calib.intrinsics.size()),
                         [&](const tbb::blocked_range<size_t>& r) {
                           for (size_t i = r.begin(); i != r.end(); ++i) {
+                            // 构建图像金字塔
                             pyramid->at(i).setFromImage(
                                 *new_img_vec->img_data[i].img,
-                                config.optical_flow_levels);
+                                config.optical_flow_level         // 金字塔层数（默认3层）
+                              );
                           }
                         });
 
@@ -182,6 +194,7 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
       new_transforms->observations.resize(calib.intrinsics.size());
       new_transforms->t_ns = t_ns;
 
+      // 这里是当前帧与上一帧进行光流追踪
       for (size_t i = 0; i < calib.intrinsics.size(); i++) {
         trackPoints(old_pyramid->at(i), pyramid->at(i),
                     transforms->observations[i],
@@ -211,10 +224,10 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
   /**
    * @brief 使用光流追踪算法计算左目图像提取的特征点在右目图像中的位置，（图像到图像的追踪） 
    * 
-   * @param pyr_1             左目图像
-   * @param pyr_2             右目图像
-   * @param transform_map_1   左目图像特征点
-   * @param transform_map_2   右目图像特征点
+   * @param pyr_1             左目图像金字塔/上一帧图像金字塔
+   * @param pyr_2             右目图像金字塔/当前帧图像金字塔
+   * @param transform_map_1   左目图像特征点/上一帧图像特征点
+   * @param transform_map_2   右目图像特征点/当前帧图像特征点
    */
   void trackPoints(const basalt::ManagedImagePyr<uint16_t>& pyr_1,
                    const basalt::ManagedImagePyr<uint16_t>& pyr_2,
@@ -372,10 +385,15 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
     return patch_valid;
   }
 
+  /**
+   * @brief 给图像金字塔添加特征点（cv::FAST)
+   * 
+   */
   void addPoints() {
+    // 勇于保存已经检测到的特征点
     Eigen::aligned_vector<Eigen::Vector2d> pts0;
 
-    // 将以前追踪到的点放入到pts0，进行临时保存
+    // 将以前追踪到的特征点点放入到pts0，进行临时保存
     for (const auto& kv : transforms->observations.at(0)) {
       pts0.emplace_back(kv.second.translation().cast<double>());
     }
@@ -466,6 +484,7 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
  private:
+  // 记录当前帧时间戳
   int64_t t_ns;
 
   size_t frame_counter;
@@ -475,7 +494,7 @@ class FrameToFrameOpticalFlow : public OpticalFlowBase {
   VioConfig config;
   basalt::Calibration<Scalar> calib;
 
-  OpticalFlowResult::Ptr transforms;
+  OpticalFlowResult::Ptr transforms;  // 光流处理结果
   std::shared_ptr<std::vector<basalt::ManagedImagePyr<uint16_t>>> old_pyramid,
       pyramid;
 

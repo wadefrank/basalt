@@ -71,6 +71,7 @@ OpticalFlowBase::Ptr OpticalFlowFactory::getOpticalFlow(
     }
   }
 
+  // 默认
   if (config.optical_flow_type == "frame_to_frame") {
     switch (config.optical_flow_pattern) {
       case 24:
@@ -81,7 +82,7 @@ OpticalFlowBase::Ptr OpticalFlowFactory::getOpticalFlow(
         res.reset(new FrameToFrameOpticalFlow<float, Pattern52>(config, cam));
         break;
 
-      case 51:
+      case 51:  // 默认
         res.reset(new FrameToFrameOpticalFlow<float, Pattern51>(config, cam));
         break;
 

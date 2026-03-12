@@ -164,7 +164,7 @@ void detectKeypointsMapping(const basalt::Image<const uint16_t>& img_raw,
  * @param img_raw           图像
  * @param kd                保存新检测到的特征点的容器
  * @param PATCH_SIZE        单个cell的边长（默认50）
- * @param num_points_cell   每个cell提取的特征点的个数
+ * @param num_points_cell   每个cell提取的特征点的个数（默认为1）
  * @param current_points    当前已经检测到的特征点
  */
 void detectKeypoints(
