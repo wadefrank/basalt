@@ -107,26 +107,42 @@ class LandmarkBlockAbsDynamic : public LandmarkBlock<Scalar> {
     state = State::Allocated;
   }
 
+
+  /**
+   * @brief 对路标点进行线性化，构建重投影误差的雅可比矩阵和残差
+   * 
+   * @return Scalar 
+   */
   // may set state to NumericalFailure --> linearization at this state is
   // unusable. Numeric check is only performed for residuals that were
   // considered to be used (valid), which depends on
   // use_valid_projections_only setting.
+  // 可能会将状态设置为 NumericalFailure —— 表示在此状态下的线性化不可用
+  // 数值检查仅对被认为有效(valid)的残差执行，取决于 use_valid_projections_only 设置
   virtual inline Scalar linearizeLandmark() override {
+    // 断言当前状态必须是以下之一：已分配、数值失败、已线性化、已边缘化
     BASALT_ASSERT(state == State::Allocated ||
                   state == State::NumericalFailure ||
                   state == State::Linearized || state == State::Marginalized);
 
+    // 将存储矩阵清零，准备填入新的线性化结果
+    // storage 矩阵的布局: 每个观测占2行（u,v残差），列包含各位姿的雅可比、路标雅可比和残差
     // storage.setZero(num_rows, num_cols);
     storage.setZero();
+    // 清空阻尼旋转向量并预分配空间（用于LM阻尼）
     damping_rotations.clear();
     damping_rotations.reserve(6);
 
+    // 数值有效性标志，若任何雅可比包含非有限值（NaN/Inf）则置为 false
     bool numerically_valid = true;
 
+    // 累计加权重投影误差
     Scalar error_sum = 0;
 
+    // 遍历该路标点的所有观测（每个观测对应一个相机位姿和一次特征点检测）
     size_t i = 0;
     for (const auto& [tcid_t, obs] : lm_ptr->obs) {
+      // std::visit 根据相机内参的实际类型（多态变体）分派到对应的相机模型
       std::visit(
           [&, obs = obs](const auto& cam) {
             // TODO: The pose_lin_vec[i] == nullptr is intended to deal with
@@ -140,61 +156,91 @@ class LandmarkBlockAbsDynamic : public LandmarkBlock<Scalar> {
             // linearization. Otherwise, check where else we need a `if
             // (pose_lin_vec[i])` check or `pose_lin_vec[i] != nullptr` assert
             // in this class.
+            // TODO: pose_lin_vec[i] == nullptr 是为了处理边缘化过程中被丢弃的观测。
+            // 但被丢弃的观测应该只出现在剩余帧中，而不是已边缘化的帧中。
+            // 可能是两个同时被边缘化的帧之间的观测？但这些不应该被丢弃...
+            // 需要进一步检查这种情况何时发生，并可能通过修复此处的处理逻辑，
+            // 或在调用线性化之前更新 lmdb 中的观测来解决。
 
+            // 仅当该观测对应的位姿线性化信息存在时才处理
             if (pose_lin_vec[i]) {
+              // obs_idx: 该观测在 storage 矩阵中的起始行索引（每个观测占2行）
               size_t obs_idx = i * 2;
+              // abs_h_idx: host帧（路标点所在帧）在绝对位姿排序中的列偏移
               size_t abs_h_idx =
                   aom_->abs_order_map.at(pose_tcid_vec[i]->first.frame_id)
                       .first;
+              // abs_t_idx: target帧（观测帧）在绝对位姿排序中的列偏移
               size_t abs_t_idx =
                   aom_->abs_order_map.at(pose_tcid_vec[i]->second.frame_id)
                       .first;
 
+              // res: 2维重投影残差（像素坐标误差）
               Vec2 res;
+              // d_res_d_xi: 残差对相对位姿扰动的雅可比 (2 x POSE_SIZE)
               Eigen::Matrix<Scalar, 2, POSE_SIZE> d_res_d_xi;
+              // d_res_d_p: 残差对路标点3D坐标的雅可比 (2 x 3)
               Eigen::Matrix<Scalar, 2, 3> d_res_d_p;
 
+              // 根据具体相机模型 CamT，对该观测进行线性化
+              // 计算重投影残差 res，以及对相对位姿和路标点的雅可比
               using CamT = std::decay_t<decltype(cam)>;
               bool valid = linearizePoint<Scalar, CamT>(
                   obs, *lm_ptr, pose_lin_vec[i]->T_t_h, cam, res, &d_res_d_xi,
                   &d_res_d_p);
 
+              // 根据配置决定是否只使用有效投影，或使用所有投影
               if (!options_->use_valid_projections_only || valid) {
+                // 检查雅可比矩阵的数值有效性（无 NaN 或 Inf）
                 numerically_valid = numerically_valid &&
                                     d_res_d_xi.array().isFinite().all() &&
                                     d_res_d_p.array().isFinite().all();
 
+                // 计算残差的平方范数
                 const Scalar res_squared = res.squaredNorm();
+                // 使用鲁棒核函数计算加权误差和权重（例如 Huber 核）
                 const auto [weighted_error, weight] =
                     compute_error_weight(res_squared);
+                // sqrt_weight 结合了鲁棒核权重和观测噪声标准差
+                // 用于对残差和雅可比进行加权，使得优化目标为加权最小二乘
                 const Scalar sqrt_weight =
                     std::sqrt(weight) / options_->obs_std_dev;
 
+                // 累加加权误差（除以方差进行归一化）
                 error_sum += weighted_error /
                              (options_->obs_std_dev * options_->obs_std_dev);
 
+                // 将加权后的路标点雅可比 d_res_d_p 存入 storage 对应位置
                 storage.template block<2, 3>(obs_idx, lm_idx) =
                     sqrt_weight * d_res_d_p;
+                // 将加权后的残差存入 storage 的残差列
                 storage.template block<2, 1>(obs_idx, res_idx) =
                     sqrt_weight * res;
 
+                // 对相对位姿雅可比施加权重
                 d_res_d_xi *= sqrt_weight;
+                // 通过链式法则，将相对位姿雅可比转换为对 host 帧绝对位姿的雅可比
+                // d_res_d_h = d_res_d_xi * d_rel_d_h，累加到 storage 中 host 帧对应列
                 storage.template block<2, 6>(obs_idx, abs_h_idx) +=
                     d_res_d_xi * pose_lin_vec[i]->d_rel_d_h;
+                // 通过链式法则，将相对位姿雅可比转换为对 target 帧绝对位姿的雅可比
+                // d_res_d_t = d_res_d_xi * d_rel_d_t，累加到 storage 中 target 帧对应列
                 storage.template block<2, 6>(obs_idx, abs_t_idx) +=
                     d_res_d_xi * pose_lin_vec[i]->d_rel_d_t;
               }
             }
 
+            // 观测索引递增（无论该观测是否被处理）
             i++;
           },
           calib_->intrinsics[tcid_t.cam_id].variant);
     }
 
+    // 根据数值有效性设置线性化状态
     if (numerically_valid) {
-      state = State::Linearized;
+      state = State::Linearized;  // 线性化成功
     } else {
-      state = State::NumericalFailure;
+      state = State::NumericalFailure;  // 存在数值问题，线性化不可用
     }
 
     return error_sum;
