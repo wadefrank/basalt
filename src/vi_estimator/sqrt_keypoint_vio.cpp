@@ -350,7 +350,7 @@ SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueue() {
 
 /**
  * @brief VIO核心测量函数：融合IMU预积分数据和视觉光流观测，完成状态预测、关键帧判定、特征三角化、优化与边缘化
- * @tparam Scalar_ 数值类型模板参数（如float/double）
+ * @tparam Scalar_ 模板参数，数值类型（如float/double），用于控制精度
  * @param opt_flow_meas 视觉光流观测结果指针（包含特征点观测、时间戳等）
  * @param meas IMU预积分测量值指针（两帧间的IMU积分结果，可为空）
  * @return 函数执行状态（固定返回true，表示执行成功）
@@ -724,7 +724,7 @@ Eigen::VectorXd SqrtKeypointVioEstimator<Scalar_>::checkMargEigenvalues()
 /**
  * @brief 
  * 
- * @tparam Scalar_                  数值类型模板参数（如float/double），用于控制精度
+ * @tparam Scalar_                  模板参数，数值类型（如float/double），用于控制精度
  * @param num_points_connected      
  * @param lost_landmaks             丢失路标点数量
  */
@@ -1191,7 +1191,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
 /**
  * @brief 基于列文伯格-马夸尔特（LM）算法的视觉惯性里程计（VIO）优化器核心实现
  * 
- * @tparam Scalar_ 数值类型模板参数（如float/double），用于控制精度
+ * @tparam Scalar_ 模板参数，数值类型（如float/double），用于控制精度
  */
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::optimize() {

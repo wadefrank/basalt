@@ -113,14 +113,32 @@ LandmarkDatabase<Scalar_>::getLandmarksForHost(const TimeCamId &tcid) const {
   return res;
 }
 
+/**
+ * @brief 添加一条"路标点在某帧中被观测到"的记录
+ * 
+ * @tparam Scalar_    模板参数，数值类型（如float/double），用于控制精度
+ * @param tcid_target 观测到该路标点的帧（target帧，即当前看到这个特征点的帧+相机ID）
+ * @param o           观测数据，包含路标点ID (o.kpt_id) 和该路标点在target帧中的2D归一化坐标 (o.pos)
+ */
 template <class Scalar_>
 void LandmarkDatabase<Scalar_>::addObservation(
     const TimeCamId &tcid_target, const KeypointObservation<Scalar> &o) {
+  // 在路标点数据库 kpts 中查找该路标点
+  // kpts 的类型: unordered_map<KeypointId, Keypoint<Scalar>>
+  //  - it->first = 路标点ID
+  //  - it->second = Keypoint结构体（包含方向、逆深度、宿主帧、观测列表）
   auto it = kpts.find(o.kpt_id);
+  // 断言该路标点必须已存在于数据库中（应在之前通过 addLandmark 添加过）
   BASALT_ASSERT(it != kpts.end());
 
+  // 更新路标点自身的观测列表，记录该路标点在 tcid_target 帧中的2D坐标
+  // Keypoint::obs 类型: map<TimeCamId, Vec2>
   it->second.obs[tcid_target] = o.pos;
 
+  // 更新帧对共视索引表 observations：
+  // observations[host帧][target帧].insert(路标点ID)
+  // 含义：宿主帧(host_kf_id)上的路标点(it->first)在target帧(tcid_target)中也被观测到了
+  // 这是"以帧对为中心"的反向索引，用于后续快速查询两帧之间共视的路标点集合
   observations[it->second.host_kf_id][tcid_target].insert(it->first);
 }
 

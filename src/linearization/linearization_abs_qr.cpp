@@ -181,34 +181,70 @@ void LinearizationAbsQR<Scalar_, POSE_SIZE_>::log_problem_stats(
   UNUSED(stats);
 }
 
+/**
+ * @brief 对整个BA问题进行线性化
+ * 
+ * @note 核心步骤: 
+ *        1) 线性化相对位姿
+ *        2) 线性化路标点
+ *        3) 线性化IMU
+ *        4) 计算边缘化先验误差
+ * 
+ * @tparam Scalar 
+ * @tparam POSE_SIZE 
+ * @param numerically_valid   输出参数，标记线性化过程中是否存在数值问题（如NaN）
+ * @return Scalar 总的误差/代价值 (所有残差的加权平方和)
+ */
 template <typename Scalar, int POSE_SIZE>
 Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
     bool* numerically_valid) {
+  // 重置阻尼和缩放参数（可能在上一次迭代中被设置过）
+  // 在LM算法中，每次线性化前需要重置阻尼项，后续会根据需要重新设置
   // reset damping and scaling (might be set from previous iteration)
   pose_damping_diagonal = 0;
   pose_damping_diagonal_sqrt = 0;
   marg_scaling = VecX();
 
+  // ===================== 第一步：线性化相对位姿 =====================
+  // 遍历所有观测关系，计算每对(host帧, target帧)之间的相对位姿及其雅可比矩阵
+  // lmdb_ 是路标点数据库，getObservations() 返回所有帧对帧的观测关系
+  // tcid_h: host帧的 TimeCamId（时间戳+相机ID）
+  // target_map: 该host帧所观测到的所有target帧的映射
   // Linearize relative poses
   for (const auto& [tcid_h, target_map] : lmdb_.getObservations()) {
     // if (used_frames && used_frames->count(tcid_h.frame_id) == 0) continue;
 
     for (const auto& [tcid_t, _] : target_map) {
+      // tcid_t: target帧的 TimeCamId
+      // key: (host, target) 帧对，用于索引相对位姿线性化结构体
       std::pair<TimeCamId, TimeCamId> key(tcid_h, tcid_t);
       RelPoseLin<Scalar>& rpl = relative_pose_lin.at(key);
 
+      // 如果host帧和target帧不是同一帧，则需要计算相对位姿
       if (tcid_h != tcid_t) {
+        // 获取host帧和target帧的位姿状态（包含线性化点信息）
         const PoseStateWithLin<Scalar>& state_h =
             estimator->getPoseStateWithLin(tcid_h.frame_id);
         const PoseStateWithLin<Scalar>& state_t =
             estimator->getPoseStateWithLin(tcid_t.frame_id);
 
+        // 在线性化点处计算相对位姿 T_t_h 及其对host和target位姿的雅可比矩阵
+        // T_t_h = T_t_c_t * T_c_t_w * T_w_c_h * T_c_h_h
+        //       = T_i_c[t]^{-1} * T_w_i[t]^{-1} * T_w_i[h] * T_i_c[h]
+        // d_rel_d_h: 相对位姿对host帧位姿增量的雅可比 (6x6)
+        // d_rel_d_t: 相对位姿对target帧位姿增量的雅可比 (6x6)
+        // getPoseLin() 返回线性化点处的位姿（FEJ - First Estimate Jacobian）
         // compute relative pose & Jacobians at linearization point
         Sophus::SE3<Scalar> T_t_h_sophus =
             computeRelPose(state_h.getPoseLin(), calib.T_i_c[tcid_h.cam_id],
                            state_t.getPoseLin(), calib.T_i_c[tcid_t.cam_id],
                            &rpl.d_rel_d_h, &rpl.d_rel_d_t);
 
+        // FEJ（First Estimate Jacobian）策略：
+        // 雅可比始终在线性化点处计算（保证零空间的一致性），
+        // 但相对位姿的值需要用当前最新的状态估计来计算，以获得准确的残差。
+        // 如果任一帧已经被线性化过（即当前估计 != 线性化点），
+        // 则用当前状态重新计算相对位姿的值（不重新计算雅可比）
         // if either state is already linearized, then the current state
         // estimate is different from the linearization point, so recompute
         // the value (not Jacobian) again based on the current state.
@@ -218,8 +254,12 @@ Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
                              state_t.getPose(), calib.T_i_c[tcid_t.cam_id]);
         }
 
+        // 将Sophus的SE3对象转为4x4齐次变换矩阵存储
         rpl.T_t_h = T_t_h_sophus.matrix();
       } else {
+        // host帧和target帧是同一帧（同一时刻的不同相机，如双目的左右目）
+        // 相对位姿为单位阵，雅可比为零（因为同一帧的位姿变化不影响帧内相对关系，
+        // 帧内的相对关系由固定的外参 T_i_c 决定）
         rpl.T_t_h.setIdentity();
         rpl.d_rel_d_h.setZero();
         rpl.d_rel_d_t.setZero();
@@ -227,43 +267,65 @@ Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
     }
   }
 
+  // ===================== 第二步：线性化路标点 =====================
+  // 使用TBB并行归约来线性化所有路标点，同时累加误差值
   // Linearize landmarks
   size_t num_landmarks = landmark_blocks.size();
 
+  // body lambda: TBB parallel_reduce 的工作函数
+  // 对每个路标点块执行线性化，累加误差并检查数值有效性
+  // error_valid.first: 累积的重投影误差
+  // error_valid.second: 是否所有路标点线性化都数值有效（无NaN/Inf）
   auto body = [&](const tbb::blocked_range<size_t>& range,
                   std::pair<Scalar, bool> error_valid) {
     for (size_t r = range.begin(); r != range.end(); ++r) {
+      // linearizeLandmark(): 对单个路标点进行线性化
+      // 计算该路标点所有观测的重投影残差、雅可比矩阵，返回该路标点的误差贡献
       error_valid.first += landmark_blocks[r]->linearizeLandmark();
+      // 检查是否有数值失败（如路标点深度为负、投影到图像外等）
       error_valid.second =
           error_valid.second && !landmark_blocks[r]->isNumericalFailure();
     }
     return error_valid;
   };
 
+  // parallel_reduce 的初始值：误差为0，数值有效性为true
   std::pair<Scalar, bool> initial_value = {0.0, true};
+  // join lambda: 合并两个子任务的结果（误差求和，有效性取逻辑与）
   auto join = [](auto p1, auto p2) {
     p1.first += p2.first;
     p1.second = p1.second && p2.second;
     return p1;
   };
 
+  // 使用TBB并行归约，将所有路标点的线性化工作分配到多个线程
+  // TBB会自动将 [0, num_landmarks) 范围划分为多个子块并行执行
   tbb::blocked_range<size_t> range(0, num_landmarks);
   auto reduction_res = tbb::parallel_reduce(range, initial_value, body, join);
 
+  // 将数值有效性结果通过输出参数返回给调用者
   if (numerically_valid) *numerically_valid = reduction_res.second;
 
+  // ===================== 第三步：线性化IMU预积分因子 =====================
+  // 如果存在IMU线性化数据（VIO模式下），则对每个IMU预积分块进行线性化
+  // 并将IMU残差的误差累加到总误差中
   if (imu_lin_data) {
     for (auto& imu_block : imu_blocks) {
       reduction_res.first += imu_block->linearizeImu(estimator->frame_states);
     }
   }
 
+  // ===================== 第四步：计算边缘化先验误差 =====================
+  // 如果存在边缘化先验数据，计算边缘化先验的误差贡献
+  // 边缘化先验来自于之前被边缘化掉的帧和路标点，以先验因子的形式
+  // 约束当前滑动窗口中的状态，防止信息丢失
   if (marg_lin_data) {
     Scalar marg_prior_error;
     estimator->computeMargPriorError(*marg_lin_data, marg_prior_error);
     reduction_res.first += marg_prior_error;
   }
 
+  // 返回总误差 = 视觉重投影误差 + IMU预积分误差 + 边缘化先验误差
   return reduction_res.first;
 }
 
