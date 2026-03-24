@@ -148,7 +148,7 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(
 }
 
 /**
- * @brief VIO估计器初始化函数
+ * @brief VIO估计器初始化函数（VIO主线程）
  * @tparam Scalar_ 模板参数，数值类型（如float/double）
  * @param bg_ 陀螺仪偏置初始值（double类型）
  * @param ba_ 加速度计偏置初始值（double类型）
@@ -175,7 +175,7 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
 
     // 主循环：持续处理视觉帧和IMU数据
     while (true) {
-      // 从视觉数据队列中取出当前帧
+      // 从视觉数据队列中取出当前帧（阻塞队列，如果队列为空则一直等待）
       vision_data_queue.pop(curr_frame);
       
       // 如果开启实时性强制模式：清空队列中多余的帧，只保留最新的一帧
@@ -196,7 +196,7 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
       if (!initialized) {
         // 跳过所有时间戳早于当前视觉帧的IMU数据，找到与当前帧时间匹配的IMU数据
         while (data->t_ns < curr_frame->t_ns) {
-          // 从IMU队列中取出IMU数据
+          // 从IMU队列中取出IMU数据（阻塞队列，如果队列为空则一直等待）
           data = popFromImuDataQueue();
           
           // IMU数据为空则退出循环
