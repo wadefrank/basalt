@@ -126,7 +126,19 @@ class LinearizationAbsQR : public LinearizationBase<Scalar_, POSE_SIZE_> {
   const MargLinData<Scalar>* marg_lin_data;
   const ImuLinData<Scalar>* imu_lin_data;
 
+  /**
+   * @brief 缓存/预计算表，用于缓存所有帧对 (host, target) 之间的相对位姿线性化信息。
+   *   using PoseLinMapType = Eigen::aligned_unordered_map<std::pair<TimeCamId, TimeCamId>, RelPoseLin<Scalar>>;
+   *     - TimeCamId
+   *     - TimeCamId
+   *     - RelPoseLin<Scalar>
+   *         - T_t_h        4×4 矩阵    target帧到host帧的相对位姿变换矩阵
+   *         - d_rel_d_h    6×6 矩阵    相对位姿对 host 帧位姿增量的雅可比
+   *         - d_rel_d_t    6×6 矩阵    对位姿对 target 帧位姿增量的雅可比
+   */
   PoseLinMapType relative_pose_lin;
+
+  
   std::vector<std::vector<PoseLinMapTypeConstIter>> relative_pose_per_host;
 
   Scalar pose_damping_diagonal;

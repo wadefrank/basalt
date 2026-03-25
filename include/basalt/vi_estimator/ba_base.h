@@ -199,18 +199,39 @@ class BundleAdjustmentBase {
     for (auto& kv : frame_poses) kv.second.restore();
     lmdb.restore();
   }
-
+  
   // protected:
+  /**
+   * @brief 根据时间戳获取帧的位姿状态（含线性化点信息）
+   *
+   * 系统中帧的状态存储在两个不同的容器中：
+   *   - frame_poses: 仅包含位姿 (T_w_i)，用于已被边缘化的帧（如mapper中的关键帧）
+   *   - frame_states: 包含完整状态 (位姿 + 速度 + IMU偏置)，用于滑动窗口中的活跃帧
+   *
+   * 查找策略：优先在 frame_poses 中查找，找不到再去 frame_states 中查找。
+   * 返回类型统一为 PoseStateWithLin（仅含位姿部分），如果来源是 frame_states，
+   * 则通过转换构造函数从 PoseVelBiasStateWithLin 中提取位姿相关字段
+   * （T_w_i、delta的前6维、linearized标志）。
+   *
+   * @param t_ns 帧的时间戳（纳秒），作为帧的唯一标识
+   * @return 该帧的位姿状态，包含线性化点位姿、当前位姿和增量delta
+   */
   PoseStateWithLin<Scalar> getPoseStateWithLin(int64_t t_ns) const {
+    // 首先在 frame_poses 中查找（边缘化后仅保留位姿的帧）
     auto it = frame_poses.find(t_ns);
     if (it != frame_poses.end()) return it->second;
 
+    // frame_poses 中没有，则在 frame_states 中查找（滑动窗口中的活跃帧）
     auto it2 = frame_states.find(t_ns);
     if (it2 == frame_states.end()) {
+      // 两个容器中都找不到，说明该时间戳对应的帧不存在，属于严重错误，直接终止
       std::cerr << "Could not find pose " << t_ns << std::endl;
       std::abort();
     }
 
+    // 从 PoseVelBiasStateWithLin 构造 PoseStateWithLin：
+    // 提取 linearized 标志、delta 的前6维（位姿增量）、线性化点位姿，
+    // 并通过 incPose(delta) 恢复出当前位姿 T_w_i_current
     return PoseStateWithLin<Scalar>(it2->second);
   }
 

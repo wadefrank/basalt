@@ -38,44 +38,125 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace basalt {
 
+/**
+ * @brief 计算从host相机坐标系到target相机坐标系的相对位姿，并可选地计算其对
+ *        host和target IMU位姿的雅可比矩阵
+ *
+ * 相对位姿变换链：
+ *   T_t_c_h_c = T_i_c_t^{-1} * T_w_i_t^{-1} * T_w_i_h * T_i_c_h
+ *             = T_c_t_i_t * T_i_t_w * T_w_i_h * T_i_h_c_h
+ *
+ * 其中：
+ *   T_w_i_h: host帧 IMU 在世界坐标系下的位姿
+ *   T_i_c_h: host帧相机相对于IMU的外参（固定标定值）
+ *   T_w_i_t: target帧 IMU 在世界坐标系下的位姿
+ *   T_i_c_t: target帧相机相对于IMU的外参（固定标定值）
+ *
+ * Basalt 位姿扰动模型 (incPose):
+ *   对 T_w_i = (R_w_i, p_w_i)，增量 δ = [δp; δφ] (6维) 定义为：
+ *     - 平移：p_w_i → p_w_i + δp      （世界坐标系下的加法扰动）
+ *     - 旋转：R_w_i → Exp(δφ) * R_w_i  （世界坐标系下的左乘扰动）
+ *
+ * 雅可比定义（对应 test_vio.cpp 的数值验证）：
+ *   J * δ = Log(T_rel(δ) * T_rel_nominal^{-1})
+ *   即：δ 映射到 T_rel 上的 **左扰动**
+ *
+ * @param T_w_i_h  host帧 IMU 位姿（世界系）
+ * @param T_i_c_h  host帧 IMU→相机 外参
+ * @param T_w_i_t  target帧 IMU 位姿（世界系）
+ * @param T_i_c_t  target帧 IMU→相机 外参
+ * @param d_rel_d_h  [输出] 相对位姿对 host IMU 位姿扰动的雅可比 (6×6)，可为nullptr
+ * @param d_rel_d_t  [输出] 相对位姿对 target IMU 位姿扰动的雅可比 (6×6)，可为nullptr
+ * @return T_t_c_h_c: target相机系到host相机系的相对变换
+ */
 template <class Scalar>
 Sophus::SE3<Scalar> computeRelPose(
     const Sophus::SE3<Scalar>& T_w_i_h, const Sophus::SE3<Scalar>& T_i_c_h,
     const Sophus::SE3<Scalar>& T_w_i_t, const Sophus::SE3<Scalar>& T_i_c_t,
     Sophus::Matrix6<Scalar>* d_rel_d_h = nullptr,
     Sophus::Matrix6<Scalar>* d_rel_d_t = nullptr) {
+  // tmp2 = T_i_c_t^{-1} = T_c_t_i_t（target相机系到target IMU系的变换）
   Sophus::SE3<Scalar> tmp2 = (T_i_c_t).inverse();
 
-  // 计算T_t_i_h_i
+  // ---- 计算 T_t_i_h_i = T_w_i_t^{-1} * T_w_i_h ----
+  // 这里显式分解旋转和平移分别计算，而不是直接用 SE3 的 inverse() * 运算。
+  // 原因：Basalt 的扰动模型对旋转和平移分别定义（平移加法 + 旋转左乘），
+  // 这种分解方式与后面雅可比推导中的扰动传播一一对应，便于理解和推导。
   Sophus::SE3<Scalar> T_t_i_h_i;
+  // 旋转部分：R_i_t_i_h = R_w_i_t^T * R_w_i_h
   T_t_i_h_i.so3() = T_w_i_t.so3().inverse() * T_w_i_h.so3();
+  // 平移部分：t_i_t_i_h = R_w_i_t^T * (p_w_i_h - p_w_i_t)
   T_t_i_h_i.translation() =
       T_w_i_t.so3().inverse() * (T_w_i_h.translation() - T_w_i_t.translation());
 
-  Sophus::SE3<Scalar> tmp = tmp2 * T_t_i_h_i;   // tmp = T_t_c_h_i
-  Sophus::SE3<Scalar> res = tmp * T_i_c_h;      // res = T_t_c_h_i * T_i_c_h = T_t_c_h_c
+  // tmp = T_c_t_i_t * T_i_t_i_h = T_c_t_i_h（target相机系到host IMU系）
+  Sophus::SE3<Scalar> tmp = tmp2 * T_t_i_h_i;
+  // res = T_c_t_i_h * T_i_h_c_h = T_c_t_c_h（最终的相对位姿：target相机系到host相机系）
+  Sophus::SE3<Scalar> res = tmp * T_i_c_h;
 
-  // 右扰动，求相对位姿对 host frame 的导数
+  // ===================== d_rel_d_h: 相对位姿对 host 位姿的雅可比 =====================
+  //
+  // 推导思路：
+  //   1) 对 T_w_i_h 施加扰动 δ_h = [δp; δφ]：
+  //        R_w_i_h → Exp(δφ) * R_w_i_h,  p_w_i_h → p_w_i_h + δp
+  //
+  //   2) T_t_i_h_i 变为 T_t_i_h_i * Exp(RR * δ_h)（右扰动）
+  //      其中 RR = blkdiag(R_i_h_w, R_i_h_w) 将世界坐标系扰动转换到 host IMU 体坐标系
+  //      （因为 SE3 的右扰动 Exp(ξ) 中 ξ 定义在体坐标系）
+  //
+  //   3) 从 T_t_i_h_i 传播到 T_rel：
+  //        tmp(δ) = tmp2 * T_t_i_h_i * Exp(RR*δ) = tmp * Exp(RR*δ)
+  //        res(δ) = tmp * Exp(RR*δ) * T_i_c_h
+  //
+  //   4) 表示为 T_rel 的左扰动：
+  //        res(δ) * res^{-1} = tmp * Exp(RR*δ) * tmp^{-1} = Exp(Ad(tmp) * RR * δ)
+  //
+  //   5) 因此：d_rel_d_h = Ad(tmp) * RR
+  //
   if (d_rel_d_h) {
+    // R = R_w_i_h^{-1} = R_i_h_w
     Sophus::Matrix3<Scalar> R = T_w_i_h.so3().inverse().matrix();
 
+    // RR = blkdiag(R_i_h_w, R_i_h_w)
+    // 作用：将 δ = [δp; δφ]（世界系）转换为 host IMU 体坐标系下的 se3 扰动
     Sophus::Matrix6<Scalar> RR;
     RR.setZero();
     RR.template topLeftCorner<3, 3>() = R;
     RR.template bottomRightCorner<3, 3>() = R;
 
+    // d_rel_d_h = Ad(T_c_t_i_h) * RR
+    // Ad(tmp) 将 tmp（T_c_t_i_h）的右扰动传播为 res 的左扰动
     *d_rel_d_h = tmp.Adj() * RR;
   }
 
-  // 左扰动，求相对位姿对 target frame 的导数
+  // ===================== d_rel_d_t: 相对位姿对 target 位姿的雅可比 =====================
+  //
+  // 推导思路：
+  //   1) 对 T_w_i_t 施加扰动 δ_t = [δp; δφ]：
+  //        R_w_i_t → Exp(δφ) * R_w_i_t,  p_w_i_t → p_w_i_t + δp
+  //
+  //   2) T_w_i_t^{-1} 变化导致 T_t_i_h_i 产生左扰动 Exp(-RR * δ_t) * T_t_i_h_i
+  //      其中 RR = blkdiag(R_i_t_w, R_i_t_w)，负号因为扰动作用在"分母"（逆变换）上
+  //
+  //   3) 传播到 res：
+  //        tmp(δ) = tmp2 * Exp(-RR*δ) * T_t_i_h_i = Exp(-Ad(tmp2)*RR*δ) * tmp
+  //        res(δ) = Exp(-Ad(tmp2)*RR*δ) * tmp * T_i_c_h = Exp(-Ad(tmp2)*RR*δ) * res
+  //
+  //   4) 因此：d_rel_d_t = -Ad(tmp2) * RR
+  //
   if (d_rel_d_t) {
+    // R = R_w_i_t^{-1} = R_i_t_w
     Sophus::Matrix3<Scalar> R = T_w_i_t.so3().inverse().matrix();
 
+    // RR = blkdiag(R_i_t_w, R_i_t_w)
+    // 作用：将 δ = [δp; δφ]（世界系）转换为 target IMU 体坐标系下的 se3 扰动
     Sophus::Matrix6<Scalar> RR;
     RR.setZero();
     RR.template topLeftCorner<3, 3>() = R;
     RR.template bottomRightCorner<3, 3>() = R;
 
+    // d_rel_d_t = -Ad(T_c_t_i_t) * RR
+    // 负号来源：target位姿出现在逆变换中，扰动方向取反
     *d_rel_d_t = -tmp2.Adj() * RR;
   }
 

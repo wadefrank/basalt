@@ -208,12 +208,14 @@ Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
   // ===================== 第一步：线性化相对位姿 =====================
   // 遍历所有观测关系，计算每对(host帧, target帧)之间的相对位姿及其雅可比矩阵
   // lmdb_ 是路标点数据库，getObservations() 返回所有帧对帧的观测关系
-  // tcid_h: host帧的 TimeCamId（时间戳+相机ID）
-  // target_map: 该host帧所观测到的所有target帧的映射
+  //   - tcid_h: host帧的 TimeCamId（时间戳+相机ID）
+  //   - target_map: 该host帧所观测到的所有target帧的映射
   // Linearize relative poses
   for (const auto& [tcid_h, target_map] : lmdb_.getObservations()) {
     // if (used_frames && used_frames->count(tcid_h.frame_id) == 0) continue;
 
+    //   std::unordered_map<TimeCamId, std::map<TimeCamId, std::set<KeypointId>>> observations;
+    // observations[tcid_h][tcid_t] 返回的是：所有以 tcid_h 为宿主帧、同时在 tcid_t 中也被观测到的路标点ID集合。
     for (const auto& [tcid_t, _] : target_map) {
       // tcid_t: target帧的 TimeCamId
       // key: (host, target) 帧对，用于索引相对位姿线性化结构体

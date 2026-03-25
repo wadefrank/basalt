@@ -14,9 +14,9 @@ struct RelPoseLin {
   using Mat4 = Eigen::Matrix<Scalar, 4, 4>;
   using Mat6 = Eigen::Matrix<Scalar, 6, 6>;
 
-  Mat4 T_t_h;
-  Mat6 d_rel_d_h;
-  Mat6 d_rel_d_t;
+  Mat4 T_t_h;       // target帧到host帧的相对位姿变换矩阵
+  Mat6 d_rel_d_h;   // 相对位姿对 host 帧位姿增量的雅可比
+  Mat6 d_rel_d_t;   // 相对位姿对 target 帧位姿增量的雅可比
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
